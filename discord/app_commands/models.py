@@ -25,18 +25,22 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 from datetime import datetime
 
-
+from .errors import MissingApplicationID
 from ..permissions import Permissions
-from ..enums import AppCommandOptionType, AppCommandType, ChannelType, try_enum
+from ..enums import AppCommandOptionType, AppCommandType, AppCommandPermissionType, ChannelType, try_enum
 from ..mixins import Hashable
-from ..utils import _get_as_snowflake, parse_time, snowflake_time
-from typing import Generic, List, TYPE_CHECKING, Optional, TypeVar, Union
+from ..utils import _get_as_snowflake, parse_time, snowflake_time, MISSING
+from ..object import Object
+
+from typing import Any, Dict, Generic, List, TYPE_CHECKING, Optional, TypeVar, Union
 
 __all__ = (
     'AppCommand',
     'AppCommandGroup',
     'AppCommandChannel',
     'AppCommandThread',
+    'AppCommandPermissions',
+    'GuildAppCommandPermissions',
     'Argument',
     'Choice',
     'AllChannels',
@@ -54,6 +58,8 @@ if TYPE_CHECKING:
         ApplicationCommand as ApplicationCommandPayload,
         ApplicationCommandOptionChoice,
         ApplicationCommandOption,
+        ApplicationCommandPermissions,
+        GuildApplicationCommandPermissions,
     )
     from ..types.interactions import (
         PartialChannel,
@@ -63,10 +69,15 @@ if TYPE_CHECKING:
         ThreadMetadata,
         ThreadArchiveDuration,
     )
+
+    from ..abc import Snowflake
     from ..state import ConnectionState
     from ..guild import GuildChannel, Guild
     from ..channel import TextChannel
     from ..threads import Thread
+    from ..role import Role
+    from ..user import User
+    from ..member import Member
 
     ApplicationCommandParent = Union['AppCommand', 'AppCommandGroup']
 
@@ -85,14 +96,14 @@ class AllChannels:
     __slots__ = ('guild',)
 
     def __init__(self, guild: Guild):
-        self.guild = guild
+        self.guild: Guild = guild
 
     @property
     def id(self) -> int:
         """:class:`int`: The ID sentinel used to represent all channels. Equivalent to the guild's ID minus 1."""
         return self.guild.id - 1
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f'<AllChannels guild={self.guild}>'
 
 
@@ -134,10 +145,17 @@ class AppCommand(Hashable):
         The application command's name.
     description: :class:`str`
         The application command's description.
+    options: List[Union[:class:`AppCommand`, :class:`AppCommandGroup`]]
+        A list of options.
     default_member_permissions: Optional[:class:`~discord.Permissions`]
         The default member permissions that can run this command.
     dm_permission: :class:`bool`
         A boolean that indicates whether this command can be run in direct messages.
+    guild_id: Optional[:class:`int`]
+        The ID of the guild this command is registered in. A value of ``None``
+        denotes that it is a global command.
+    nsfw: :class:`bool`
+        Whether the command is NSFW and should only work in NSFW channels.
     """
 
     __slots__ = (
@@ -146,14 +164,16 @@ class AppCommand(Hashable):
         'application_id',
         'name',
         'description',
+        'guild_id',
         'options',
         'default_member_permissions',
         'dm_permission',
+        'nsfw',
         '_state',
     )
 
-    def __init__(self, *, data: ApplicationCommandPayload, state: Optional[ConnectionState] = None) -> None:
-        self._state: Optional[ConnectionState] = state
+    def __init__(self, *, data: ApplicationCommandPayload, state: ConnectionState) -> None:
+        self._state: ConnectionState = state
         self._from_data(data)
 
     def _from_data(self, data: ApplicationCommandPayload) -> None:
@@ -161,6 +181,7 @@ class AppCommand(Hashable):
         self.application_id: int = int(data['application_id'])
         self.name: str = data['name']
         self.description: str = data['description']
+        self.guild_id: Optional[int] = _get_as_snowflake(data, 'guild_id')
         self.type: AppCommandType = try_enum(AppCommandType, data.get('type', 1))
         self.options: List[Union[Argument, AppCommandGroup]] = [
             app_command_option_factory(data=d, parent=self, state=self._state) for d in data.get('options', [])
@@ -178,6 +199,7 @@ class AppCommand(Hashable):
             dm_permission = True
 
         self.dm_permission: bool = dm_permission
+        self.nsfw: bool = data.get('nsfw', False)
 
     def to_dict(self) -> ApplicationCommandPayload:
         return {
@@ -194,6 +216,169 @@ class AppCommand(Hashable):
 
     def __repr__(self) -> str:
         return f'<{self.__class__.__name__} id={self.id!r} name={self.name!r} type={self.type!r}>'
+
+    @property
+    def guild(self) -> Optional[Guild]:
+        """Optional[:class:`~discord.Guild`]: Returns the guild this command is registered to
+        if it exists.
+        """
+        return self._state._get_guild(self.guild_id)
+
+    async def delete(self) -> None:
+        """|coro|
+
+        Deletes the application command.
+
+        Raises
+        -------
+        NotFound
+            The application command was not found.
+        Forbidden
+            You do not have permission to delete this application command.
+        HTTPException
+            Deleting the application command failed.
+        MissingApplicationID
+            The client does not have an application ID.
+        """
+        state = self._state
+        if not state.application_id:
+            raise MissingApplicationID
+
+        if self.guild_id:
+            await state.http.delete_guild_command(
+                state.application_id,
+                self.guild_id,
+                self.id,
+            )
+        else:
+            await state.http.delete_global_command(
+                state.application_id,
+                self.id,
+            )
+
+    async def edit(
+        self,
+        *,
+        name: str = MISSING,
+        description: str = MISSING,
+        default_member_permissions: Optional[Permissions] = MISSING,
+        dm_permission: bool = MISSING,
+        options: List[Union[Argument, AppCommandGroup]] = MISSING,
+    ) -> AppCommand:
+        """|coro|
+
+        Edits the application command.
+
+        Parameters
+        -----------
+        name: :class:`str`
+            The new name for the application command.
+        description: :class:`str`
+            The new description for the application command.
+        default_member_permissions: Optional[:class:`~discord.Permissions`]
+            The new default permissions needed to use this application command.
+            Pass value of ``None`` to remove any permission requirements.
+        dm_permission: :class:`bool`
+            Indicates if the application command can be used in DMs.
+        options: List[Union[:class:`Argument`, :class:`AppCommandGroup`]]
+            List of new options for this application command.
+
+        Raises
+        -------
+        NotFound
+            The application command was not found.
+        Forbidden
+            You do not have permission to edit this application command.
+        HTTPException
+            Editing the application command failed.
+        MissingApplicationID
+            The client does not have an application ID.
+
+        Returns
+        --------
+        :class:`AppCommand`
+            The newly edited application command.
+        """
+        state = self._state
+        if not state.application_id:
+            raise MissingApplicationID
+
+        payload = {}
+
+        if name is not MISSING:
+            payload['name'] = name
+
+        if description is not MISSING:
+            payload['description'] = description
+
+        if default_member_permissions is not MISSING:
+            if default_member_permissions is not None:
+                payload['default_member_permissions'] = default_member_permissions.value
+            else:
+                payload['default_member_permissions'] = None
+
+        if self.guild_id is None and dm_permission is not MISSING:
+            payload['dm_permission'] = dm_permission
+
+        if options is not MISSING:
+            payload['options'] = [option.to_dict() for option in options]
+
+        if not payload:
+            return self
+
+        if self.guild_id:
+            data = await state.http.edit_guild_command(
+                state.application_id,
+                self.guild_id,
+                self.id,
+                payload,
+            )
+        else:
+            data = await state.http.edit_global_command(
+                state.application_id,
+                self.id,
+                payload,
+            )
+        return AppCommand(data=data, state=state)
+
+    async def fetch_permissions(self, guild: Snowflake) -> GuildAppCommandPermissions:
+        """|coro|
+
+        Retrieves this command's permission in the guild.
+
+        Parameters
+        -----------
+        guild: :class:`~discord.abc.Snowflake`
+            The guild to retrieve the permissions from.
+
+        Raises
+        -------
+        Forbidden
+            You do not have permission to fetch the application command's permissions.
+        HTTPException
+            Fetching the application command's permissions failed.
+        MissingApplicationID
+            The client does not have an application ID.
+        NotFound
+            The application command's permissions could not be found.
+            This can also indicate that the permissions are synced with the guild
+            (i.e. they are unchanged from the default).
+
+        Returns
+        --------
+        :class:`GuildAppCommandPermissions`
+            An object representing the application command's permissions in the guild.
+        """
+        state = self._state
+        if not state.application_id:
+            raise MissingApplicationID
+
+        data = await state.http.get_application_command_permissions(
+            state.application_id,
+            guild.id,
+            self.id,
+        )
+        return GuildAppCommandPermissions(data=data, state=state, command=self)
 
 
 class Choice(Generic[ChoiceT]):
@@ -560,6 +745,14 @@ class Argument:
         A list of choices for the command to choose from for this argument.
     parent: Union[:class:`AppCommand`, :class:`AppCommandGroup`]
         The parent application command that has this argument.
+    channel_types: List[:class:`~discord.ChannelType`]
+        The channel types that are allowed for this parameter.
+    min_value: Optional[Union[:class:`int`, :class:`float`]]
+        The minimum supported value for this parameter.
+    max_value: Optional[Union[:class:`int`, :class:`float`]]
+        The maximum supported value for this parameter.
+    autocomplete: :class:`bool`
+        Whether the argument has autocomplete.
     """
 
     __slots__ = (
@@ -568,6 +761,10 @@ class Argument:
         'description',
         'required',
         'choices',
+        'channel_types',
+        'min_value',
+        'max_value',
+        'autocomplete',
         'parent',
         '_state',
     )
@@ -587,6 +784,10 @@ class Argument:
         self.name: str = data['name']
         self.description: str = data['description']
         self.required: bool = data.get('required', False)
+        self.min_value: Optional[Union[int, float]] = data.get('min_value')
+        self.max_value: Optional[Union[int, float]] = data.get('max_value')
+        self.autocomplete: bool = data.get('autocomplete', False)
+        self.channel_types: List[ChannelType] = [try_enum(ChannelType, d) for d in data.get('channel_types', [])]
         self.choices: List[Choice[Union[int, float, str]]] = [
             Choice(name=d['name'], value=d['value']) for d in data.get('choices', [])
         ]
@@ -598,6 +799,10 @@ class Argument:
             'description': self.description,
             'required': self.required,
             'choices': [choice.to_dict() for choice in self.choices],
+            'channel_types': [channel_type.value for channel_type in self.channel_types],
+            'min_value': self.min_value,
+            'max_value': self.max_value,
+            'autocomplete': self.autocomplete,
             'options': [],
         }  # type: ignore # Type checker does not understand this literal.
 
@@ -615,12 +820,8 @@ class AppCommandGroup:
         The name of the subcommand.
     description: :class:`str`
         The description of the subcommand.
-    required: :class:`bool`
-        Whether the subcommand is required.
-    choices: List[:class:`Choice`]
-        A list of choices for the command to choose from for this subcommand.
-    arguments: List[:class:`Argument`]
-        A list of arguments.
+    options: List[Union[:class:`AppCommand`, :class:`AppCommandGroup`]]
+        A list of options.
     parent: Union[:class:`AppCommand`, :class:`AppCommandGroup`]
         The parent application command.
     """
@@ -629,9 +830,7 @@ class AppCommandGroup:
         'type',
         'name',
         'description',
-        'required',
-        'choices',
-        'arguments',
+        'options',
         'parent',
         '_state',
     )
@@ -644,20 +843,14 @@ class AppCommandGroup:
         self._from_data(data)
 
     def __repr__(self) -> str:
-        return f'<{self.__class__.__name__} name={self.name!r} type={self.type!r} required={self.required}>'
+        return f'<{self.__class__.__name__} name={self.name!r} type={self.type!r}>'
 
     def _from_data(self, data: ApplicationCommandOption) -> None:
         self.type: AppCommandOptionType = try_enum(AppCommandOptionType, data['type'])
         self.name: str = data['name']
         self.description: str = data['description']
-        self.required: bool = data.get('required', False)
-        self.choices: List[Choice[Union[int, float, str]]] = [
-            Choice(name=d['name'], value=d['value']) for d in data.get('choices', [])
-        ]
-        self.arguments: List[Argument] = [
-            Argument(parent=self, state=self._state, data=d)
-            for d in data.get('options', [])
-            if is_app_command_argument_type(d['type'])
+        self.options: List[Union[Argument, AppCommandGroup]] = [
+            app_command_option_factory(data=d, parent=self, state=self._state) for d in data.get('options', [])
         ]
 
     def to_dict(self) -> 'ApplicationCommandOption':
@@ -665,10 +858,108 @@ class AppCommandGroup:
             'name': self.name,
             'type': self.type.value,
             'description': self.description,
-            'required': self.required,
-            'choices': [choice.to_dict() for choice in self.choices],
-            'options': [arg.to_dict() for arg in self.arguments],
+            'options': [arg.to_dict() for arg in self.options],
         }  # type: ignore # Type checker does not understand this literal.
+
+
+class AppCommandPermissions:
+    """Represents the permissions for an application command.
+
+    .. versionadded:: 2.0
+
+    Attributes
+    -----------
+    guild: :class:`~discord.Guild`
+        The guild associated with this permission.
+    id: :class:`int`
+        The ID of the permission target, such as a role, channel, or guild.
+        The special ``guild_id - 1`` sentinel is used to represent "all channels".
+    target: Any
+        The role, user, or channel associated with this permission. This could also be the :class:`AllChannels` sentinel type.
+        Falls back to :class:`~discord.Object` if the target could not be found in the cache.
+    type: :class:`.AppCommandPermissionType`
+        The type of permission.
+    permission: :class:`bool`
+        The permission value. ``True`` for allow, ``False`` for deny.
+    """
+
+    __slots__ = ('id', 'type', 'permission', 'target', 'guild', '_state')
+
+    def __init__(self, *, data: ApplicationCommandPermissions, guild: Guild, state: ConnectionState) -> None:
+        self._state: ConnectionState = state
+        self.guild: Guild = guild
+
+        self.id: int = int(data['id'])
+        self.type: AppCommandPermissionType = try_enum(AppCommandPermissionType, data['type'])
+        self.permission: bool = data['permission']
+
+        _object = None
+
+        if self.type is AppCommandPermissionType.user:
+            _object = guild.get_member(self.id) or self._state.get_user(self.id)
+        elif self.type is AppCommandPermissionType.channel:
+            if self.id == (guild.id - 1):
+                _object = AllChannels(guild)
+            else:
+                _object = guild.get_channel(self.id)
+        elif self.type is AppCommandPermissionType.role:
+            _object = guild.get_role(self.id)
+
+        if _object is None:
+            _object = Object(id=self.id)
+
+        self.target: Union[Object, User, Member, Role, AllChannels, GuildChannel] = _object
+
+    def to_dict(self) -> ApplicationCommandPermissions:
+        return {
+            'id': self.target.id,
+            'type': self.type.value,
+            'permission': self.permission,
+        }
+
+
+class GuildAppCommandPermissions:
+    """Represents the permissions for an application command in a guild.
+
+    .. versionadded:: 2.0
+
+    Attributes
+    -----------
+    application_id: :class:`int`
+        The application ID.
+    command: :class:`.AppCommand`
+        The application command associated with the permissions.
+    id: :class:`int`
+        ID of the command or the application ID.
+        When this is the application ID instead of a command ID,
+        the permissions apply to all commands that do not contain explicit overwrites.
+    guild_id: :class:`int`
+        The guild ID associated with the permissions.
+    permissions: List[:class:`AppCommandPermissions`]
+       The permissions, this is a max of 100.
+    """
+
+    __slots__ = ('id', 'application_id', 'command', 'guild_id', 'permissions', '_state')
+
+    def __init__(self, *, data: GuildApplicationCommandPermissions, state: ConnectionState, command: AppCommand) -> None:
+        self._state: ConnectionState = state
+        self.command: AppCommand = command
+
+        self.id: int = int(data['id'])
+        self.application_id: int = int(data['application_id'])
+        self.guild_id: int = int(data['guild_id'])
+        guild = self.guild
+        self.permissions: List[AppCommandPermissions] = [
+            AppCommandPermissions(data=value, guild=guild, state=self._state) for value in data['permissions']
+        ]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {'permissions': [p.to_dict() for p in self.permissions]}
+
+    @property
+    def guild(self) -> Guild:
+        """:class:`~discord.Guild`: The guild associated with the permissions."""
+        return self._state._get_or_create_unavailable_guild(self.guild_id)
 
 
 def app_command_option_factory(

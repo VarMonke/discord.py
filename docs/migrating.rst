@@ -176,7 +176,7 @@ naive :class:`~datetime.datetime`, such exceptions are listed below).
 Because naive :class:`~datetime.datetime` objects are treated by many of its methods as local times, the previous behavior
 was more likely to result in programming errors with their usage.
 
-To ease the migration :func:`utils.utcnow` helper function has been added.
+To ease the migration, :func:`utils.utcnow` helper function has been added.
 
 .. warning::
     Using :meth:`datetime.datetime.utcnow` can be problematic since it returns a naive UTC ``datetime`` object.
@@ -933,6 +933,17 @@ The following methods have been changed:
 - :meth:`Webhook.send`
 - :meth:`abc.GuildChannel.set_permissions`
 
+Logging Changes
+----------------
+
+The library now provides a default logging configuration if using :meth:`Client.run`. To disable it, pass ``None`` to the ``log_handler`` keyword parameter. Since the library now provides a default logging configuration, certain methods were changed to no longer print to :data:`sys.stderr` but use the logger instead:
+
+- :meth:`Client.on_error`
+- :meth:`discord.ext.tasks.Loop.error`
+- :meth:`discord.ext.commands.Bot.on_command_error`
+
+For more information, check :doc:`logging`.
+
 Removal of ``StoreChannel``
 -----------------------------
 
@@ -996,7 +1007,6 @@ Parameters in the following methods are now all positional-only:
 The following parameters are now positional-only:
 
 - ``iterable`` in :meth:`utils.get`
-- ``event`` in :meth:`Client.dispatch`
 - ``event_method`` in :meth:`Client.on_error`
 - ``event`` in :meth:`Client.wait_for`
 
@@ -1219,6 +1229,8 @@ The following changes have been made:
 
 - :attr:`File.filename` will no longer be ``None``, in situations where previously this was the case the filename is set to `'untitled'`.
 
+- :attr:`Message.application` will no longer be a raw :class:`dict` of the API payload and now returns an instance of :class:`MessageApplication`.
+
 :meth:`VoiceProtocol.connect` signature changes.
 --------------------------------------------------
 
@@ -1323,29 +1335,18 @@ Parameters in the following methods are now all positional-only:
 - :meth:`ext.commands.Bot.get_prefix`
 - :meth:`ext.commands.Bot.invoke`
 - :meth:`ext.commands.Bot.process_commands`
-- :meth:`ext.commands.Bot.on_message`
-- :meth:`ext.commands.Command.dispatch_error`
-- :meth:`ext.commands.Command.transform`
-- :meth:`ext.commands.Command.call_before_hooks`
-- :meth:`ext.commands.Command.call_after_hooks`
-- :meth:`ext.commands.Command.prepare`
 - :meth:`ext.commands.Command.is_on_cooldown`
 - :meth:`ext.commands.Command.reset_cooldown`
 - :meth:`ext.commands.Command.get_cooldown_retry_after`
-- :meth:`ext.commands.Command.invoke`
 - :meth:`ext.commands.Command.error`
 - :meth:`ext.commands.Command.before_invoke`
 - :meth:`ext.commands.Command.after_invoke`
 - :meth:`ext.commands.Command.can_run`
-- :meth:`ext.commands.Group.invoke`
 - :meth:`ext.commands.check`
 - :meth:`ext.commands.has_role`
 - :meth:`ext.commands.bot_has_role`
 - :meth:`ext.commands.before_invoke`
 - :meth:`ext.commands.after_invoke`
-- :meth:`ext.commands.HelpCommand.call_before_hooks`
-- :meth:`ext.commands.HelpCommand.call_after_hooks`
-- :meth:`ext.commands.HelpCommand.can_run`
 - :meth:`ext.commands.HelpCommand.get_command_signature`
 - :meth:`ext.commands.HelpCommand.remove_mentions`
 - :meth:`ext.commands.HelpCommand.command_not_found`
@@ -1360,39 +1361,24 @@ Parameters in the following methods are now all positional-only:
 - :meth:`ext.commands.HelpCommand.prepare_help_command`
 - :meth:`ext.commands.DefaultHelpCommand.shorten_text`
 - :meth:`ext.commands.DefaultHelpCommand.add_command_formatting`
-- :meth:`ext.commands.DefaultHelpCommand.prepare_help_command`
-- :meth:`ext.commands.DefaultHelpCommand.send_bot_help`
-- :meth:`ext.commands.DefaultHelpCommand.send_command_help`
-- :meth:`ext.commands.DefaultHelpCommand.send_group_help`
-- :meth:`ext.commands.DefaultHelpCommand.send_cog_help`
 - :meth:`ext.commands.MinimalHelpCommand.get_command_signature`
 - :meth:`ext.commands.MinimalHelpCommand.add_bot_commands_formatting`
 - :meth:`ext.commands.MinimalHelpCommand.add_subcommand_formatting`
 - :meth:`ext.commands.MinimalHelpCommand.add_aliases_formatting`
 - :meth:`ext.commands.MinimalHelpCommand.add_command_formatting`
-- :meth:`ext.commands.MinimalHelpCommand.prepare_help_command`
-- :meth:`ext.commands.MinimalHelpCommand.send_bot_help`
-- :meth:`ext.commands.MinimalHelpCommand.send_cog_help`
-- :meth:`ext.commands.MinimalHelpCommand.send_group_help`
-- :meth:`ext.commands.MinimalHelpCommand.send_command_help`
 
 The following parameters are now positional-only:
 
-- ``event_name`` in :meth:`ext.commands.Bot.dispatch`
 - ``func`` in :meth:`ext.commands.Bot.check`
 - ``func`` in :meth:`ext.commands.Bot.add_check`
 - ``func`` in :meth:`ext.commands.Bot.remove_check`
 - ``func`` in :meth:`ext.commands.Bot.check_once`
-- ``ctx`` in :meth:`ext.commands.Bot.can_run`
 - ``func`` in :meth:`ext.commands.Bot.add_listener`
 - ``func`` in :meth:`ext.commands.Bot.remove_listener`
 - ``message`` in :meth:`ext.commands.Bot.get_context`
 - ``func`` in :meth:`ext.commands.Command.add_check`
 - ``func`` in :meth:`ext.commands.Command.remove_check`
 - ``context`` in :meth:`ext.commands.Command.__call__`
-- ``ctx`` in :meth:`ext.commands.Command.reinvoke`
-- ``ctx`` in :meth:`ext.commands.Group.reinvoke`
-- ``context`` in :meth:`ext.commands.HelpCommand.__call__`
 - ``commands`` in :meth:`ext.commands.HelpCommand.filter_commands`
 - ``ctx`` in :meth:`ext.commands.HelpCommand.command_callback`
 - ``func`` in :meth:`ext.commands.HelpCommand.add_check`
@@ -1448,7 +1434,7 @@ Miscellaneous Changes
 
 - Metaclass of :class:`~ext.commands.Context` changed from :class:`abc.ABCMeta` to :class:`type`.
 - Changed type of :attr:`ext.commands.Command.clean_params` from :class:`collections.OrderedDict` to :class:`dict`.
-  as the latter is guaranteed to preserve insertion order since Python 3.7.
+  As the latter is guaranteed to preserve insertion order since Python 3.7.
 - :attr:`ext.commands.ChannelNotReadable.argument` may now be a :class:`Thread` due to the :ref:`migrating_2_0_thread_support` changes.
 - :attr:`ext.commands.NSFWChannelRequired.channel` may now be a :class:`Thread` due to the :ref:`migrating_2_0_thread_support` changes.
 - :attr:`ext.commands.Context.channel` may now be a :class:`Thread` due to the :ref:`migrating_2_0_thread_support` changes.

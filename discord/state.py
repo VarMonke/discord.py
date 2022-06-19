@@ -184,6 +184,7 @@ class ConnectionState:
         self.shard_count: Optional[int] = None
         self._ready_task: Optional[asyncio.Task] = None
         self.application_id: Optional[int] = utils._get_as_snowflake(options, 'application_id')
+        self.application_flags: ApplicationFlags = utils.MISSING
         self.heartbeat_timeout: float = options.get('heartbeat_timeout', 60.0)
         self.guild_ready_timeout: float = options.get('guild_ready_timeout', 2.0)
         if self.guild_ready_timeout < 0:
@@ -380,6 +381,9 @@ class ConnectionState:
     def _get_guild(self, guild_id: Optional[int]) -> Optional[Guild]:
         # the keys of self._guilds are ints
         return self._guilds.get(guild_id)  # type: ignore
+
+    def _get_or_create_unavailable_guild(self, guild_id: int) -> Guild:
+        return self._guilds.get(guild_id) or Guild._create_unavailable(state=self, guild_id=guild_id)
 
     def _add_guild(self, guild: Guild) -> None:
         self._guilds[guild.id] = guild
@@ -727,7 +731,7 @@ class ConnectionState:
             inner_data = data['data']
             custom_id = inner_data['custom_id']
             components = inner_data['components']
-            self._view_store.dispatch_modal(custom_id, interaction, components)  # type: ignore
+            self._view_store.dispatch_modal(custom_id, interaction, components)
         self.dispatch('interaction', interaction)
 
     def parse_presence_update(self, data: gw.PresenceUpdateEvent) -> None:
@@ -870,8 +874,9 @@ class ConnectionState:
             _log.debug('THREAD_UPDATE referencing an unknown guild ID: %s. Discarding', guild_id)
             return
 
-        thread_id = int(data['id'])
-        thread = guild.get_thread(thread_id)
+        raw = RawThreadUpdateEvent(data)
+        raw.thread = thread = guild.get_thread(raw.thread_id)
+        self.dispatch('raw_thread_update', raw)
         if thread is not None:
             old = copy.copy(thread)
             thread._update(data)
@@ -960,6 +965,7 @@ class ConnectionState:
 
         thread_id = int(data['id'])
         thread: Optional[Thread] = guild.get_thread(thread_id)
+        raw = RawThreadMembersUpdate(data)
         if thread is None:
             _log.debug('THREAD_MEMBERS_UPDATE referencing an unknown thread ID: %s. Discarding', thread_id)
             return
@@ -978,6 +984,7 @@ class ConnectionState:
         for member_id in removed_member_ids:
             if member_id != self_id:
                 member = thread._pop_member(member_id)
+                self.dispatch('raw_thread_member_remove', raw)
                 if member is not None:
                     self.dispatch('thread_member_remove', member)
             else:
@@ -1482,7 +1489,7 @@ class ConnectionState:
         self.dispatch('raw_typing', raw)
 
     def _get_reaction_user(self, channel: MessageableChannel, user_id: int) -> Optional[Union[User, Member]]:
-        if isinstance(channel, TextChannel):
+        if isinstance(channel, (TextChannel, Thread, VoiceChannel)):
             return channel.guild.get_member(user_id)
         return self.get_user(user_id)
 

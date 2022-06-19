@@ -56,7 +56,7 @@ from .errors import *
 from .parameters import Parameter, Signature
 
 if TYPE_CHECKING:
-    from typing_extensions import Concatenate, ParamSpec, Self, TypeGuard
+    from typing_extensions import Concatenate, ParamSpec, Self
 
     from discord.message import Message
 
@@ -237,6 +237,27 @@ class _CaseInsensitiveDict(dict):
         super().__setitem__(k.casefold(), v)
 
 
+class _AttachmentIterator:
+    def __init__(self, data: List[discord.Attachment]):
+        self.data: List[discord.Attachment] = data
+        self.index: int = 0
+
+    def __iter__(self) -> Self:
+        return self
+
+    def __next__(self) -> discord.Attachment:
+        try:
+            value = self.data[self.index]
+        except IndexError:
+            raise StopIteration
+        else:
+            self.index += 1
+            return value
+
+    def is_empty(self) -> bool:
+        return self.index >= len(self.data)
+
+
 class Command(_BaseCommand, Generic[CogT, P, T]):
     r"""A class that implements the protocol for a bot text command.
 
@@ -333,8 +354,8 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
     def __init__(
         self,
         func: Union[
-            Callable[Concatenate[CogT, ContextT, P], Coro[T]],
-            Callable[Concatenate[ContextT, P], Coro[T]],
+            Callable[Concatenate[CogT, Context[Any], P], Coro[T]],
+            Callable[Concatenate[Context[Any], P], Coro[T]],
         ],
         /,
         **kwargs: Any,
@@ -378,7 +399,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         except AttributeError:
             checks = kwargs.get('checks', [])
 
-        self.checks: List[UserCheck[ContextT]] = checks
+        self.checks: List[UserCheck[Context[Any]]] = checks
 
         try:
             cooldown = func.__commands_cooldown__
@@ -458,7 +479,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
 
         self.params: Dict[str, Parameter] = get_signature_parameters(function, globalns)
 
-    def add_check(self, func: UserCheck[ContextT], /) -> None:
+    def add_check(self, func: UserCheck[Context[Any]], /) -> None:
         """Adds a check to the command.
 
         This is the non-decorator interface to :func:`.check`.
@@ -469,6 +490,8 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
 
             ``func`` parameter is now positional-only.
 
+        .. seealso:: The :func:`~discord.ext.commands.check` decorator
+
         Parameters
         -----------
         func
@@ -477,7 +500,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
 
         self.checks.append(func)
 
-    def remove_check(self, func: UserCheck[ContextT], /) -> None:
+    def remove_check(self, func: UserCheck[Context[Any]], /) -> None:
         """Removes a check from the command.
 
         This function is idempotent and will not raise an exception
@@ -592,7 +615,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         finally:
             ctx.bot.dispatch('command_error', ctx, error)
 
-    async def transform(self, ctx: Context[BotT], param: Parameter, /) -> Any:
+    async def transform(self, ctx: Context[BotT], param: Parameter, attachments: _AttachmentIterator, /) -> Any:
         converter = param.converter
         consume_rest_is_special = param.kind == param.KEYWORD_ONLY and not self.rest_is_raw
         view = ctx.view
@@ -601,6 +624,10 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         # The greedy converter is simple -- it keeps going until it fails in which case,
         # it undos the view ready for the next parameter to use instead
         if isinstance(converter, Greedy):
+            # Special case for Greedy[discord.Attachment] to consume the attachments iterator
+            if converter.converter is discord.Attachment:
+                return list(attachments)
+
             if param.kind in (param.POSITIONAL_OR_KEYWORD, param.POSITIONAL_ONLY):
                 return await self._transform_greedy_pos(ctx, param, param.required, converter.converter)
             elif param.kind == param.VAR_POSITIONAL:
@@ -610,6 +637,20 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
                 # since this is mostly useless, we'll helpfully transform Greedy[X]
                 # into just X and do the parsing that way.
                 converter = converter.converter
+
+        # Try to detect Optional[discord.Attachment] or discord.Attachment special converter
+        if converter is discord.Attachment:
+            try:
+                return next(attachments)
+            except StopIteration:
+                raise MissingRequiredAttachment(param)
+
+        if self._is_typing_optional(param.annotation) and param.annotation.__args__[0] is discord.Attachment:
+            if attachments.is_empty():
+                # I have no idea who would be doing Optional[discord.Attachment] = 1
+                # but for those cases then 1 should be returned instead of None
+                return None if param.default is param.empty else param.default
+            return next(attachments)
 
         if view.eof:
             if param.kind == param.VAR_POSITIONAL:
@@ -631,7 +672,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
             except ArgumentParsingError as exc:
                 if self._is_typing_optional(param.annotation):
                     view.index = previous
-                    return None
+                    return None if param.required else await param.get_default(ctx)
                 else:
                     raise exc
         view.previous = previous
@@ -759,6 +800,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         ctx.kwargs = {}
         args = ctx.args
         kwargs = ctx.kwargs
+        attachments = _AttachmentIterator(ctx.message.attachments)
 
         view = ctx.view
         iterator = iter(self.params.items())
@@ -766,7 +808,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         for name, param in iterator:
             ctx.current_parameter = param
             if param.kind in (param.POSITIONAL_OR_KEYWORD, param.POSITIONAL_ONLY):
-                transformed = await self.transform(ctx, param)
+                transformed = await self.transform(ctx, param, attachments)
                 args.append(transformed)
             elif param.kind == param.KEYWORD_ONLY:
                 # kwarg only param denotes "consume rest" semantics
@@ -774,14 +816,14 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
                     ctx.current_argument = argument = view.read_rest()
                     kwargs[name] = await run_converters(ctx, param.converter, argument, param)
                 else:
-                    kwargs[name] = await self.transform(ctx, param)
+                    kwargs[name] = await self.transform(ctx, param, attachments)
                 break
             elif param.kind == param.VAR_POSITIONAL:
                 if view.eof and self.require_var_positional:
                     raise MissingRequiredArgument(param)
                 while not view.eof:
                     try:
-                        transformed = await self.transform(ctx, param)
+                        transformed = await self.transform(ctx, param, attachments)
                         args.append(transformed)
                     except RuntimeError:
                         break
@@ -888,6 +930,8 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
             return False
 
         bucket = self._buckets.get_bucket(ctx.message)
+        if bucket is None:
+            return False
         dt = ctx.message.edited_at or ctx.message.created_at
         current = dt.replace(tzinfo=datetime.timezone.utc).timestamp()
         return bucket.get_tokens(current) == 0
@@ -906,7 +950,8 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         """
         if self._buckets.valid:
             bucket = self._buckets.get_bucket(ctx.message)
-            bucket.reset()
+            if bucket is not None:
+                bucket.reset()
 
     def get_cooldown_retry_after(self, ctx: Context[BotT], /) -> float:
         """Retrieves the amount of seconds before this command can be tried again.
@@ -930,6 +975,8 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         """
         if self._buckets.valid:
             bucket = self._buckets.get_bucket(ctx.message)
+            if bucket is None:
+                return 0.0
             dt = ctx.message.edited_at or ctx.message.created_at
             current = dt.replace(tzinfo=datetime.timezone.utc).timestamp()
             return bucket.get_retry_after(current)
@@ -1080,7 +1127,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
             return self.help.split('\n', 1)[0]
         return ''
 
-    def _is_typing_optional(self, annotation: Union[T, Optional[T]]) -> TypeGuard[Optional[T]]:
+    def _is_typing_optional(self, annotation: Union[T, Optional[T]]) -> bool:
         return getattr(annotation, '__origin__', None) is Union and type(None) in annotation.__args__  # type: ignore
 
     @property
@@ -1107,6 +1154,17 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
                 if len(union_args) == 2 and optional:
                     annotation = union_args[0]
                     origin = getattr(annotation, '__origin__', None)
+
+            if annotation is discord.Attachment:
+                # For discord.Attachment we need to signal to the user that it's an attachment
+                # It's not exactly pretty but it's enough to differentiate
+                if optional:
+                    result.append(f'[{name} (upload a file)]')
+                elif greedy:
+                    result.append(f'[{name} (upload files)]...')
+                else:
+                    result.append(f'<{name} (upload a file)>')
+                continue
 
             # for typing.Literal[...], typing.Optional[typing.Literal[...]], and Greedy[typing.Literal[...]], the
             # parameter signature is a literal list of it's values
@@ -1191,7 +1249,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
                 # since we have no checks, then we just return True.
                 return True
 
-            return await discord.utils.async_all(predicate(ctx) for predicate in predicates)  # type: ignore
+            return await discord.utils.async_all(predicate(ctx) for predicate in predicates)
         finally:
             ctx.command = original
 
@@ -1390,7 +1448,7 @@ class GroupMixin(Generic[CogT]):
     def command(
         self: GroupMixin[CogT],
         name: str = ...,
-        cls: Type[CommandT] = ...,
+        cls: Type[CommandT] = ...,  # type: ignore  # previous overload handles case where cls is not set
         *args: Any,
         **kwargs: Any,
     ) -> Callable[
@@ -1450,7 +1508,7 @@ class GroupMixin(Generic[CogT]):
     def group(
         self: GroupMixin[CogT],
         name: str = ...,
-        cls: Type[GroupT] = ...,
+        cls: Type[GroupT] = ...,  # type: ignore  # previous overload handles case where cls is not set
         *args: Any,
         **kwargs: Any,
     ) -> Callable[
@@ -1642,7 +1700,7 @@ def command(
 @overload
 def command(
     name: str = ...,
-    cls: Type[CommandT] = ...,
+    cls: Type[CommandT] = ...,  # type: ignore  # previous overload handles case where cls is not set
     **attrs: Any,
 ) -> Callable[
     [
@@ -1712,7 +1770,7 @@ def group(
 @overload
 def group(
     name: str = ...,
-    cls: Type[GroupT] = ...,
+    cls: Type[GroupT] = ...,  # type: ignore  # previous overload handles case where cls is not set
     **attrs: Any,
 ) -> Callable[
     [
@@ -1820,9 +1878,9 @@ def check(predicate: UserCheck[ContextT], /) -> Check[ContextT]:
         The predicate to check if the command should be invoked.
     """
 
-    def decorator(func: Union[Command, CoroFunc]) -> Union[Command, CoroFunc]:
+    def decorator(func: Union[Command[Any, ..., Any], CoroFunc]) -> Union[Command[Any, ..., Any], CoroFunc]:
         if isinstance(func, Command):
-            func.checks.append(predicate)
+            func.checks.append(predicate)  # type: ignore
         else:
             if not hasattr(func, '__commands_checks__'):
                 func.__commands_checks__ = []
@@ -2222,14 +2280,48 @@ def guild_only() -> Check[Any]:
 
     This check raises a special exception, :exc:`.NoPrivateMessage`
     that is inherited from :exc:`.CheckFailure`.
+
+    If used on hybrid commands, this will be equivalent to the
+    :func:`discord.app_commands.guild_only` decorator. In an unsupported
+    context, such as a subcommand, this will still fallback to applying the
+    check.
     """
+
+    # Due to implementation quirks, this check has to be re-implemented completely
+    # to work with both app_commands and the command framework.
 
     def predicate(ctx: Context[BotT]) -> bool:
         if ctx.guild is None:
             raise NoPrivateMessage()
         return True
 
-    return check(predicate)
+    def decorator(func: Union[Command, CoroFunc]) -> Union[Command, CoroFunc]:
+        if isinstance(func, Command):
+            func.checks.append(predicate)
+            if hasattr(func, '__commands_is_hybrid__'):
+                app_command = getattr(func, 'app_command', None)
+                if app_command:
+                    app_command.guild_only = True
+        else:
+            if not hasattr(func, '__commands_checks__'):
+                func.__commands_checks__ = []
+
+            func.__commands_checks__.append(predicate)
+            func.__discord_app_commands_guild_only__ = True
+
+        return func
+
+    if inspect.iscoroutinefunction(predicate):
+        decorator.predicate = predicate
+    else:
+
+        @functools.wraps(predicate)
+        async def wrapper(ctx: Context[BotT]):
+            return predicate(ctx)
+
+        decorator.predicate = wrapper
+
+    return decorator  # type: ignore
 
 
 def is_owner() -> Check[Any]:
@@ -2256,19 +2348,55 @@ def is_nsfw() -> Check[Any]:
     This check raises a special exception, :exc:`.NSFWChannelRequired`
     that is derived from :exc:`.CheckFailure`.
 
+    If used on hybrid commands, this will be equivalent to setting the
+    application command's ``nsfw`` attribute to ``True``. In an unsupported
+    context, such as a subcommand, this will still fallback to applying the
+    check.
+
     .. versionchanged:: 1.1
 
         Raise :exc:`.NSFWChannelRequired` instead of generic :exc:`.CheckFailure`.
         DM channels will also now pass this check.
     """
 
-    def pred(ctx: Context[BotT]) -> bool:
+    # Due to implementation quirks, this check has to be re-implemented completely
+    # to work with both app_commands and the command framework.
+
+    def predicate(ctx: Context[BotT]) -> bool:
         ch = ctx.channel
-        if ctx.guild is None or (isinstance(ch, (discord.TextChannel, discord.Thread)) and ch.is_nsfw()):
+        if ctx.guild is None or (
+            isinstance(ch, (discord.TextChannel, discord.Thread, discord.VoiceChannel)) and ch.is_nsfw()
+        ):
             return True
         raise NSFWChannelRequired(ch)  # type: ignore
 
-    return check(pred)
+    def decorator(func: Union[Command, CoroFunc]) -> Union[Command, CoroFunc]:
+        if isinstance(func, Command):
+            func.checks.append(predicate)
+            if hasattr(func, '__commands_is_hybrid__'):
+                app_command = getattr(func, 'app_command', None)
+                if app_command:
+                    app_command.nsfw = True
+        else:
+            if not hasattr(func, '__commands_checks__'):
+                func.__commands_checks__ = []
+
+            func.__commands_checks__.append(predicate)
+            func.__discord_app_commands_is_nsfw__ = True
+
+        return func
+
+    if inspect.iscoroutinefunction(predicate):
+        decorator.predicate = predicate
+    else:
+
+        @functools.wraps(predicate)
+        async def wrapper(ctx: Context[BotT]):
+            return predicate(ctx)
+
+        decorator.predicate = wrapper
+
+    return decorator  # type: ignore
 
 
 def cooldown(

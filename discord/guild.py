@@ -86,6 +86,7 @@ from .sticker import GuildSticker
 from .file import File
 from .audit_logs import AuditLogEntry
 from .object import OLDEST_OBJECT, Object
+from .welcome_screen import WelcomeScreen, WelcomeChannel
 
 
 __all__ = (
@@ -120,6 +121,7 @@ if TYPE_CHECKING:
         VoiceChannel as VoiceChannelPayload,
         CategoryChannel as CategoryChannelPayload,
         StageChannel as StageChannelPayload,
+        ForumChannel as ForumChannelPayload,
     )
     from .types.integration import IntegrationType
     from .types.snowflake import SnowflakeList
@@ -236,8 +238,6 @@ class Guild(Hashable):
         - ``PREVIEW_ENABLED``: Guild can be viewed before being accepted via Membership Screening.
         - ``PRIVATE_THREADS``: Guild has access to create private threads.
         - ``ROLE_ICONS``: Guild is able to set role icons.
-        - ``SEVEN_DAY_THREAD_ARCHIVE``: Guild has access to the seven day archive time for threads.
-        - ``THREE_DAY_THREAD_ARCHIVE``: Guild has access to the three day archive time for threads.
         - ``TICKETED_EVENTS_ENABLED``: Guild has enabled ticketed events.
         - ``VANITY_URL``: Guild can have a vanity invite URL (e.g. discord.gg/discord-api).
         - ``VERIFIED``: Guild is a verified server.
@@ -280,6 +280,10 @@ class Guild(Hashable):
         Indicates if the guild has premium AKA server boost level progress bar enabled.
 
         .. versionadded:: 2.0
+    widget_enabled: :class:`bool`
+        Indicates if the guild has widget enabled.
+
+        .. versionadded:: 2.0
     """
 
     __slots__ = (
@@ -305,6 +309,7 @@ class Guild(Hashable):
         'nsfw_level',
         'mfa_level',
         'vanity_url_code',
+        'widget_enabled',
         '_members',
         '_channels',
         '_icon',
@@ -329,8 +334,8 @@ class Guild(Hashable):
     )
 
     _PREMIUM_GUILD_LIMITS: ClassVar[Dict[Optional[int], _GuildLimit]] = {
-        None: _GuildLimit(emoji=50, stickers=0, bitrate=96e3, filesize=8388608),
-        0: _GuildLimit(emoji=50, stickers=0, bitrate=96e3, filesize=8388608),
+        None: _GuildLimit(emoji=50, stickers=5, bitrate=96e3, filesize=8388608),
+        0: _GuildLimit(emoji=50, stickers=5, bitrate=96e3, filesize=8388608),
         1: _GuildLimit(emoji=100, stickers=15, bitrate=128e3, filesize=8388608),
         2: _GuildLimit(emoji=150, stickers=30, bitrate=256e3, filesize=52428800),
         3: _GuildLimit(emoji=250, stickers=60, bitrate=384e3, filesize=104857600),
@@ -449,6 +454,10 @@ class Guild(Hashable):
 
         return role
 
+    @classmethod
+    def _create_unavailable(cls, *, state: ConnectionState, guild_id: int) -> Guild:
+        return cls(state=state, data={'id': guild_id, 'unavailable': True})  # type: ignore
+
     def _from_data(self, guild: GuildPayload) -> None:
         try:
             self._member_count = guild['member_count']
@@ -486,6 +495,7 @@ class Guild(Hashable):
         self.premium_tier: int = guild.get('premium_tier', 0)
         self.premium_subscription_count: int = guild.get('premium_subscription_count') or 0
         self.vanity_url_code: Optional[str] = guild.get('vanity_url_code')
+        self.widget_enabled: bool = guild.get('widget_enabled', False)
         self._system_channel_flags: int = guild.get('system_channel_flags', 0)
         self.preferred_locale: Locale = try_enum(Locale, guild.get('preferred_locale', 'en-US'))
         self._discovery_splash: Optional[str] = guild.get('discovery_splash')
@@ -1138,6 +1148,17 @@ class Guild(Hashable):
     def _create_channel(
         self,
         name: str,
+        channel_type: Literal[ChannelType.forum],
+        overwrites: Mapping[Union[Role, Member], PermissionOverwrite] = ...,
+        category: Optional[Snowflake] = ...,
+        **options: Any,
+    ) -> Coroutine[Any, Any, ForumChannelPayload]:
+        ...
+
+    @overload
+    def _create_channel(
+        self,
+        name: str,
         channel_type: ChannelType,
         overwrites: Mapping[Union[Role, Member], PermissionOverwrite] = ...,
         category: Optional[Snowflake] = ...,
@@ -1522,6 +1543,94 @@ class Guild(Hashable):
         return channel
 
     create_category_channel = create_category
+
+    async def create_forum(
+        self,
+        name: str,
+        *,
+        topic: str = MISSING,
+        position: int = MISSING,
+        category: Optional[CategoryChannel] = None,
+        slowmode_delay: int = MISSING,
+        nsfw: bool = MISSING,
+        overwrites: Mapping[Union[Role, Member], PermissionOverwrite] = MISSING,
+        reason: Optional[str] = None,
+        default_auto_archive_duration: int = MISSING,
+    ) -> ForumChannel:
+        """|coro|
+
+        Similar to :meth:`create_text_channel` except makes a :class:`ForumChannel` instead.
+
+        The ``overwrites`` parameter can be used to create a 'secret'
+        channel upon creation. This parameter expects a :class:`dict` of
+        overwrites with the target (either a :class:`Member` or a :class:`Role`)
+        as the key and a :class:`PermissionOverwrite` as the value.
+
+        .. versionadded:: 2.0
+
+        Parameters
+        -----------
+        name: :class:`str`
+            The channel's name.
+        topic: :class:`str`
+            The channel's topic.
+        category: Optional[:class:`CategoryChannel`]
+            The category to place the newly created channel under.
+            The permissions will be automatically synced to category if no
+            overwrites are provided.
+        position: :class:`int`
+            The position in the channel list. This is a number that starts
+            at 0. e.g. the top channel is position 0.
+        nsfw: :class:`bool`
+            To mark the channel as NSFW or not.
+        slowmode_delay: :class:`int`
+            Specifies the slowmode rate limit for users in this channel, in seconds.
+            The maximum possible value is `21600`.
+        reason: Optional[:class:`str`]
+            The reason for creating this channel. Shows up in the audit log.
+        default_auto_archive_duration: :class:`int`
+            The default auto archive duuration for threads created in the forum channel (in minutes).
+
+        Raises
+        -------
+        Forbidden
+            You do not have the proper permissions to create this channel.
+        HTTPException
+            Creating the channel failed.
+        TypeError
+            The permission overwrite information is not in proper form.
+
+        Returns
+        -------
+        :class:`ForumChannel`
+            The channel that was just created.
+        """
+        options = {}
+
+        if position is not MISSING:
+            options['position'] = position
+
+        if topic is not MISSING:
+            options['topic'] = topic
+
+        if slowmode_delay is not MISSING:
+            options['rate_limit_per_user'] = slowmode_delay
+
+        if nsfw is not MISSING:
+            options['nsfw'] = nsfw
+
+        if default_auto_archive_duration is not MISSING:
+            options['default_auto_archive_duration'] = default_auto_archive_duration
+
+        data = await self._create_channel(
+            name=name, overwrites=overwrites, channel_type=ChannelType.forum, category=category, reason=reason, **options
+        )
+
+        channel = ForumChannel(state=self._state, guild=self, data=data)
+
+        # temporarily add to the cache
+        self._channels[channel.id] = channel
+        return channel
 
     async def leave(self) -> None:
         """|coro|
@@ -2648,7 +2757,7 @@ class Guild(Hashable):
         *,
         name: str,
         start_time: datetime.datetime,
-        entity_type: EntityType,
+        entity_type: EntityType = MISSING,
         privacy_level: PrivacyLevel = MISSING,
         channel: Optional[Snowflake] = MISSING,
         location: str = MISSING,
@@ -2672,7 +2781,9 @@ class Guild(Hashable):
         description: :class:`str`
             The description of the scheduled event.
         channel: Optional[:class:`abc.Snowflake`]
-            The channel to send the scheduled event to.
+            The channel to send the scheduled event to. If the channel is
+            a :class:`StageInstance` or :class:`VoiceChannel` then
+            it automatically sets the entity type.
 
             Required if ``entity_type`` is either :attr:`EntityType.voice` or
             :attr:`EntityType.stage_instance`.
@@ -2685,7 +2796,11 @@ class Guild(Hashable):
 
             Required if the entity type is :attr:`EntityType.external`.
         entity_type: :class:`EntityType`
-            The entity type of the scheduled event.
+            The entity type of the scheduled event. If the channel is a
+            :class:`StageInstance` or :class:`VoiceChannel` then this is
+            automatically set to the appropriate entity type. If no channel
+            is passed then the entity type is assumed to be
+            :attr:`EntityType.external`
         image: :class:`bytes`
             The image of the scheduled event.
         location: :class:`str`
@@ -2726,6 +2841,20 @@ class Guild(Hashable):
                     'start_time must be an aware datetime. Consider using discord.utils.utcnow() or datetime.datetime.now().astimezone() for local time.'
                 )
             payload['scheduled_start_time'] = start_time.isoformat()
+
+        if entity_type is MISSING:
+            if channel is MISSING:
+                entity_type = EntityType.external
+            else:
+                _entity_type = getattr(channel, '_scheduled_event_entity_type', MISSING)
+                if _entity_type is None:
+                    raise TypeError(
+                        f'invalid GuildChannel type passed, must be VoiceChannel or StageChannel not {channel.__class__!r}'
+                    )
+                if _entity_type is MISSING:
+                    raise TypeError('entity_type must be passed in when passing an ambiguous channel type')
+
+                entity_type = _entity_type
 
         if not isinstance(entity_type, EntityType):
             raise TypeError('entity_type must be of type EntityType')
@@ -3128,6 +3257,77 @@ class Guild(Hashable):
             self._roles[role.id] = role
 
         return roles
+
+    async def welcome_screen(self) -> WelcomeScreen:
+        """|coro|
+
+        Returns the guild's welcome screen.
+
+        The guild must have ``COMMUNITY`` in :attr:`~Guild.features`.
+
+        You must have the :attr:`~Permissions.manage_guild` permission to use
+        this as well.
+
+        .. versionadded:: 2.0
+
+        Raises
+        -------
+        Forbidden
+            You do not have the proper permissions to get this.
+        HTTPException
+            Retrieving the welcome screen failed.
+
+        Returns
+        --------
+        :class:`WelcomeScreen`
+            The welcome screen.
+        """
+        data = await self._state.http.get_welcome_screen(self.id)
+        return WelcomeScreen(data=data, guild=self)
+
+    async def edit_welcome_screen(
+        self,
+        *,
+        description: str = MISSING,
+        welcome_channels: List[WelcomeChannel] = MISSING,
+        enabled: bool = MISSING,
+        reason: Optional[str] = None,
+    ) -> WelcomeScreen:
+        """|coro|
+
+        A shorthand method of :attr:`WelcomeScreen.edit` without needing
+        to fetch the welcome screen beforehand.
+
+        The guild must have ``COMMUNITY`` in :attr:`~Guild.features`.
+
+        You must have the :attr:`~Permissions.manage_guild` permission to use
+        this as well.
+
+        .. versionadded:: 2.0
+
+        Returns
+        --------
+        :class:`WelcomeScreen`
+            The edited welcome screen.
+        """
+        fields = {}
+
+        if welcome_channels is not MISSING:
+            welcome_channels_serialised = []
+            for wc in welcome_channels:
+                if not isinstance(wc, WelcomeChannel):
+                    raise TypeError('welcome_channels parameter must be a list of WelcomeChannel')
+                welcome_channels_serialised.append(wc.to_dict())
+            fields['welcome_channels'] = welcome_channels_serialised
+
+        if description is not MISSING:
+            fields['description'] = description
+
+        if enabled is not MISSING:
+            fields['enabled'] = enabled
+
+        data = await self._state.http.edit_welcome_screen(self.id, reason=reason, **fields)
+        return WelcomeScreen(data=data, guild=self)
 
     async def kick(self, user: Snowflake, *, reason: Optional[str] = None) -> None:
         """|coro|

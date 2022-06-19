@@ -72,6 +72,14 @@ PartialAppInfo
 .. autoclass:: PartialAppInfo()
     :members:
 
+AppInstallParams
+~~~~~~~~~~~~~~~~
+
+.. attributetable:: AppInstallParams
+
+.. autoclass:: AppInstallParams()
+    :members:
+
 Team
 ~~~~~
 
@@ -187,7 +195,7 @@ overriding the specific events. For example: ::
 
 
 If an event handler raises an exception, :func:`on_error` will be called
-to handle it, which defaults to print a traceback and ignoring the exception.
+to handle it, which defaults to logging the traceback and ignoring the exception.
 
 .. warning::
 
@@ -342,18 +350,13 @@ Debug
 .. function:: on_error(event, *args, **kwargs)
 
     Usually when an event raises an uncaught exception, a traceback is
-    printed to stderr and the exception is ignored. If you want to
+    logged to stderr and the exception is ignored. If you want to
     change this behaviour and handle the exception for whatever reason
     yourself, this event can be overridden. Which, when done, will
     suppress the default action of printing the traceback.
 
     The information of the exception raised and the exception itself can
     be retrieved with a standard call to :func:`sys.exc_info`.
-
-    If you want exception to propagate out of the :class:`Client` class
-    you can define an ``on_error`` handler consisting of a single empty
-    :ref:`raise statement <py:raise>`. Exceptions raised by ``on_error`` will not be
-    handled in any way by :class:`Client`.
 
     .. note::
 
@@ -362,6 +365,10 @@ Debug
         It will not be received by :meth:`Client.wait_for`, or, if used,
         :ref:`ext_commands_api_bot` listeners such as
         :meth:`~ext.commands.Bot.listen` or :meth:`~ext.commands.Cog.listener`.
+
+    .. versionchanged:: 2.0
+
+        The traceback is now logged rather than printed.
 
     :param event: The name of the event that raised the exception.
     :type event: :class:`str`
@@ -607,7 +614,7 @@ Integrations
 
     .. versionadded:: 2.0
 
-    :param integration: The integration that was created.
+    :param integration: The integration that was updated.
     :type integration: :class:`Integration`
 
 .. function:: on_guild_integrations_update(guild)
@@ -871,7 +878,7 @@ Messages
     will return a :class:`Message` object that represents the message before the content was modified.
 
     Due to the inherently raw nature of this event, the data parameter coincides with
-    the raw data given by the `gateway <https://discord.com/developers/docs/topics/gateway#message-update>`_.
+    the raw data given by the :ddocs:`gateway <topics/gateway#message-update>`.
 
     Since the data payload can be partial, care must be taken when accessing stuff in the dictionary.
     One example of a common case of partial data is when the ``'content'`` key is inaccessible. This
@@ -957,7 +964,7 @@ Reactions
 
     :param reaction: The current state of the reaction.
     :type reaction: :class:`Reaction`
-    :param user: The user who added the reaction.
+    :param user: The user whose reaction was removed.
     :type user: Union[:class:`Member`, :class:`User`]
 
 .. function:: on_reaction_clear(message, reactions)
@@ -1168,7 +1175,11 @@ Threads
 
 .. function:: on_thread_update(before, after)
 
-    Called whenever a thread is updated.
+    Called whenever a thread is updated. If the thread could
+    not be found in the internal cache this event will not be called.
+    Threads will not be in the cache if they are archived.
+
+    If you need this information use :func:`on_raw_thread_update` instead.
 
     This requires :attr:`Intents.guilds` to be enabled.
 
@@ -1216,6 +1227,18 @@ Threads
     :param thread: The thread that got deleted.
     :type thread: :class:`Thread`
 
+.. function:: on_raw_thread_update(payload)
+
+    Called whenever a thread is update. Unlike :func:`on_thread_update` this
+    is called regardless of the thread being in the internal thread cache or not.
+
+    This requires :attr:`Intents.guilds` to be enabled.
+
+    .. versionadded:: 2.0
+
+    :param payload: The raw event payload data.
+    :type payload: :class:`RawThreadUpdateEvent`
+
 .. function:: on_raw_thread_delete(payload)
 
     Called whenever a thread is deleted. Unlike :func:`on_thread_delete` this
@@ -1241,6 +1264,18 @@ Threads
 
     :param member: The member who joined or left.
     :type member: :class:`ThreadMember`
+
+.. function:: on_raw_thread_member_remove(payload)
+
+    Called when a :class:`ThreadMember` leaves a :class:`Thread`. Unlike :func:`on_thread_member_remove` this
+    is called regardless of the member being in the internal thread's members cache or not.
+
+    This requires :attr:`Intents.members` to be enabled.
+
+    .. versionadded:: 2.0
+
+    :param payload: The raw event payload data.
+    :type member: :class:`RawThreadMembersUpdate`
 
 Voice
 ~~~~~~
@@ -3504,13 +3539,9 @@ AuditLogDiff
 
     .. attribute:: app_command_permissions
 
-        A list of application command permission tuples that represents a
-        target and a :class:`bool` for said target.
+        The permissions of the app command.
 
-        The first element is the object being targeted, which can either
-        be a :class:`Member`, :class:`abc.GuildChannel`,
-        :class:`~discord.app_commands.AllChannels`, or :class:`Role`.
-        :type: List[Tuple[target, :class:`bool`]]
+        :type: :class:`~discord.app_commands.AppCommandPermissions`
 
 .. this is currently missing the following keys: reason and application_id
    I'm not sure how to about porting these
@@ -3974,6 +4005,22 @@ Template
 .. autoclass:: Template()
     :members:
 
+WelcomeScreen
+~~~~~~~~~~~~~~~
+
+.. attributetable:: WelcomeScreen
+
+.. autoclass:: WelcomeScreen()
+    :members:
+
+WelcomeChannel
+~~~~~~~~~~~~~~~
+
+.. attributetable:: WelcomeChannel
+
+.. autoclass:: WelcomeChannel()
+    :members:
+
 WidgetChannel
 ~~~~~~~~~~~~~~~
 
@@ -4095,6 +4142,22 @@ RawIntegrationDeleteEvent
 .. autoclass:: RawIntegrationDeleteEvent()
     :members:
 
+RawThreadUpdateEvent
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. attributetable:: RawThreadUpdateEvent
+
+.. autoclass:: RawThreadUpdateEvent()
+    :members:
+
+RawThreadMembersUpdate
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. attributetable:: RawThreadMembersUpdate
+
+.. autoclass:: RawThreadMembersUpdate()
+    :members:
+
 RawThreadDeleteEvent
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -4190,6 +4253,14 @@ PartialMessage
 .. attributetable:: PartialMessage
 
 .. autoclass:: PartialMessage
+    :members:
+
+MessageApplication
+~~~~~~~~~~~~~~~~~~~
+
+.. attributetable:: MessageApplication
+
+.. autoclass:: MessageApplication
     :members:
 
 Intents
