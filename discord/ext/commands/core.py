@@ -44,6 +44,7 @@ from typing import (
     Union,
     overload,
 )
+import re
 
 import discord
 
@@ -54,11 +55,10 @@ from .converter import Greedy, run_converters
 from .cooldowns import BucketType, Cooldown, CooldownMapping, DynamicCooldownMapping, MaxConcurrency
 from .errors import *
 from .parameters import Parameter, Signature
+from discord.app_commands.commands import NUMPY_DOCSTRING_ARG_REGEX
 
 if TYPE_CHECKING:
     from typing_extensions import Concatenate, ParamSpec, Self
-
-    from discord.message import Message
 
     from ._types import BotT, Check, ContextT, Coro, CoroFunc, Error, Hook, UserCheck
 
@@ -93,9 +93,9 @@ __all__ = (
 MISSING: Any = discord.utils.MISSING
 
 T = TypeVar('T')
-CommandT = TypeVar('CommandT', bound='Command')
+CommandT = TypeVar('CommandT', bound='Command[Any, ..., Any]')
 # CHT = TypeVar('CHT', bound='Check')
-GroupT = TypeVar('GroupT', bound='Group')
+GroupT = TypeVar('GroupT', bound='Group[Any, ..., Any]')
 
 if TYPE_CHECKING:
     P = ParamSpec('P')
@@ -149,6 +149,7 @@ def get_signature_parameters(
                     parameter._annotation = default.annotation
 
             parameter._default = default.default
+            parameter._description = default._description
             parameter._displayed_default = default._displayed_default
 
         annotation = parameter.annotation
@@ -161,18 +162,46 @@ def get_signature_parameters(
         if annotation is Greedy:
             raise TypeError('Unparameterized Greedy[...] is disallowed in signature.')
 
-        if hasattr(annotation, '__metadata__'):
-            # Annotated[X, Y] can access Y via __metadata__
-            metadata = annotation.__metadata__
-            if len(metadata) >= 1:
-                annotation = metadata[0]
-
-        if isinstance(annotation, discord.app_commands.transformers._TransformMetadata):
-            annotation = annotation.metadata
-
         params[name] = parameter.replace(annotation=annotation)
 
     return params
+
+
+PARAMETER_HEADING_REGEX = re.compile(r'Parameters?\n---+\n', re.I)
+
+
+def _fold_text(input: str) -> str:
+    """Turns a single newline into a space, and multiple newlines into a newline."""
+
+    def replacer(m: re.Match[str]) -> str:
+        if len(m.group()) <= 1:
+            return ' '
+        return '\n'
+
+    return re.sub(r'\n+', replacer, inspect.cleandoc(input))
+
+
+def extract_descriptions_from_docstring(function: Callable[..., Any], params: Dict[str, Parameter], /) -> Optional[str]:
+    docstring = inspect.getdoc(function)
+
+    if docstring is None:
+        return None
+
+    divide = PARAMETER_HEADING_REGEX.split(docstring, 1)
+    if len(divide) == 1:
+        return docstring
+
+    description, param_docstring = divide
+    for match in NUMPY_DOCSTRING_ARG_REGEX.finditer(param_docstring):
+        name = match.group('name')
+        if name not in params:
+            continue
+
+        param = params[name]
+        if param.description is None:
+            param._description = _fold_text(match.group('description'))
+
+    return _fold_text(description.strip())
 
 
 def wrap_callback(coro: Callable[P, Coro[T]], /) -> Callable[P, Coro[Optional[T]]]:
@@ -375,9 +404,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         if help_doc is not None:
             help_doc = inspect.cleandoc(help_doc)
         else:
-            help_doc = inspect.getdoc(func)
-            if isinstance(help_doc, bytes):
-                help_doc = help_doc.decode('utf-8')
+            help_doc = extract_descriptions_from_docstring(func, self.params)
 
         self.help: Optional[str] = help_doc
 
@@ -385,7 +412,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         self.usage: Optional[str] = kwargs.get('usage')
         self.rest_is_raw: bool = kwargs.get('rest_is_raw', False)
         self.aliases: Union[List[str], Tuple[str]] = kwargs.get('aliases', [])
-        self.extras: Dict[str, Any] = kwargs.get('extras', {})
+        self.extras: Dict[Any, Any] = kwargs.get('extras', {})
 
         if not isinstance(self.aliases, (list, tuple)):
             raise TypeError("Aliases of a command must be a list or a tuple of strings.")
@@ -409,10 +436,10 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         if cooldown is None:
             buckets = CooldownMapping(cooldown, BucketType.default)
         elif isinstance(cooldown, CooldownMapping):
-            buckets = cooldown
+            buckets: CooldownMapping[Context[Any]] = cooldown
         else:
-            raise TypeError("Cooldown must be a an instance of CooldownMapping or None.")
-        self._buckets: CooldownMapping = buckets
+            raise TypeError("Cooldown must be an instance of CooldownMapping or None.")
+        self._buckets: CooldownMapping[Context[Any]] = buckets
 
         try:
             max_concurrency = func.__commands_max_concurrency__
@@ -424,11 +451,11 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         self.require_var_positional: bool = kwargs.get('require_var_positional', False)
         self.ignore_extra: bool = kwargs.get('ignore_extra', True)
         self.cooldown_after_parsing: bool = kwargs.get('cooldown_after_parsing', False)
-        self._cog: CogT = None
+        self._cog: CogT = None  # type: ignore # This breaks every other pyright release
 
         # bandaid for the fact that sometimes parent can be the bot instance
         parent: Optional[GroupMixin[Any]] = kwargs.get('parent')
-        self.parent: Optional[GroupMixin[Any]] = parent if isinstance(parent, _BaseCommand) else None
+        self.parent: Optional[GroupMixin[Any]] = parent if isinstance(parent, _BaseCommand) else None  # type: ignore # Does not recognise mixin usage
 
         self._before_invoke: Optional[Hook] = None
         try:
@@ -457,15 +484,15 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
     @property
     def callback(
         self,
-    ) -> Union[Callable[Concatenate[CogT, Context, P], Coro[T]], Callable[Concatenate[Context, P], Coro[T]],]:
+    ) -> Union[Callable[Concatenate[CogT, Context[Any], P], Coro[T]], Callable[Concatenate[Context[Any], P], Coro[T]],]:
         return self._callback
 
     @callback.setter
     def callback(
         self,
         function: Union[
-            Callable[Concatenate[CogT, Context, P], Coro[T]],
-            Callable[Concatenate[Context, P], Coro[T]],
+            Callable[Concatenate[CogT, Context[Any], P], Coro[T]],
+            Callable[Concatenate[Context[Any], P], Coro[T]],
         ],
     ) -> None:
         self._callback = function
@@ -559,6 +586,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
     def _ensure_assignment_on_copy(self, other: Self) -> Self:
         other._before_invoke = self._before_invoke
         other._after_invoke = self._after_invoke
+        other.extras = self.extras
         if self.checks != other.checks:
             other.checks = self.checks.copy()
         if self._buckets.valid and not other._buckets.valid:
@@ -629,14 +657,14 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
                 return list(attachments)
 
             if param.kind in (param.POSITIONAL_OR_KEYWORD, param.POSITIONAL_ONLY):
-                return await self._transform_greedy_pos(ctx, param, param.required, converter.converter)
+                return await self._transform_greedy_pos(ctx, param, param.required, converter.constructed_converter)
             elif param.kind == param.VAR_POSITIONAL:
-                return await self._transform_greedy_var_pos(ctx, param, converter.converter)
+                return await self._transform_greedy_var_pos(ctx, param, converter.constructed_converter)
             else:
                 # if we're here, then it's a KEYWORD_ONLY param type
                 # since this is mostly useless, we'll helpfully transform Greedy[X]
                 # into just X and do the parsing that way.
-                converter = converter.converter
+                converter = converter.constructed_converter
 
         # Try to detect Optional[discord.Attachment] or discord.Attachment special converter
         if converter is discord.Attachment:
@@ -879,7 +907,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         if self._buckets.valid:
             dt = ctx.message.edited_at or ctx.message.created_at
             current = dt.replace(tzinfo=datetime.timezone.utc).timestamp()
-            bucket = self._buckets.get_bucket(ctx.message, current)
+            bucket = self._buckets.get_bucket(ctx, current)
             if bucket is not None:
                 retry_after = bucket.update_rate_limit(current)
                 if retry_after:
@@ -893,7 +921,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
 
         if self._max_concurrency is not None:
             # For this application, context can be duck-typed as a Message
-            await self._max_concurrency.acquire(ctx)  # type: ignore
+            await self._max_concurrency.acquire(ctx)
 
         try:
             if self.cooldown_after_parsing:
@@ -906,7 +934,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
             await self.call_before_hooks(ctx)
         except:
             if self._max_concurrency is not None:
-                await self._max_concurrency.release(ctx)  # type: ignore
+                await self._max_concurrency.release(ctx)
             raise
 
     def is_on_cooldown(self, ctx: Context[BotT], /) -> bool:
@@ -929,7 +957,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
         if not self._buckets.valid:
             return False
 
-        bucket = self._buckets.get_bucket(ctx.message)
+        bucket = self._buckets.get_bucket(ctx)
         if bucket is None:
             return False
         dt = ctx.message.edited_at or ctx.message.created_at
@@ -949,7 +977,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
             The invocation context to reset the cooldown under.
         """
         if self._buckets.valid:
-            bucket = self._buckets.get_bucket(ctx.message)
+            bucket = self._buckets.get_bucket(ctx)
             if bucket is not None:
                 bucket.reset()
 
@@ -974,7 +1002,7 @@ class Command(_BaseCommand, Generic[CogT, P, T]):
             If this is ``0.0`` then the command isn't on cooldown.
         """
         if self._buckets.valid:
-            bucket = self._buckets.get_bucket(ctx.message)
+            bucket = self._buckets.get_bucket(ctx)
             if bucket is None:
                 return 0.0
             dt = ctx.message.edited_at or ctx.message.created_at
@@ -2021,7 +2049,7 @@ def has_role(item: Union[int, str], /) -> Check[Any]:
 def has_any_role(*items: Union[int, str]) -> Callable[[T], T]:
     r"""A :func:`.check` that is added that checks if the member invoking the
     command has **any** of the roles specified. This means that if they have
-    one out of the three roles specified, then this check will return `True`.
+    one out of the three roles specified, then this check will return ``True``.
 
     Similar to :func:`.has_role`\, the names or IDs passed in must be exact.
 
@@ -2159,8 +2187,7 @@ def has_permissions(**perms: bool) -> Check[Any]:
         raise TypeError(f"Invalid permission(s): {', '.join(invalid)}")
 
     def predicate(ctx: Context[BotT]) -> bool:
-        ch = ctx.channel
-        permissions = ch.permissions_for(ctx.author)  # type: ignore
+        permissions = ctx.permissions
 
         missing = [perm for perm, value in perms.items() if getattr(permissions, perm) != value]
 
@@ -2185,9 +2212,7 @@ def bot_has_permissions(**perms: bool) -> Check[Any]:
         raise TypeError(f"Invalid permission(s): {', '.join(invalid)}")
 
     def predicate(ctx: Context[BotT]) -> bool:
-        guild = ctx.guild
-        me = guild.me if guild is not None else ctx.bot.user
-        permissions = ctx.channel.permissions_for(me)  # type: ignore
+        permissions = ctx.bot_permissions
 
         missing = [perm for perm, value in perms.items() if getattr(permissions, perm) != value]
 
@@ -2402,7 +2427,7 @@ def is_nsfw() -> Check[Any]:
 def cooldown(
     rate: int,
     per: float,
-    type: Union[BucketType, Callable[[Message], Any]] = BucketType.default,
+    type: Union[BucketType, Callable[[Context[Any]], Any]] = BucketType.default,
 ) -> Callable[[T], T]:
     """A decorator that adds a cooldown to a :class:`.Command`
 
@@ -2423,11 +2448,15 @@ def cooldown(
         The number of times a command can be used before triggering a cooldown.
     per: :class:`float`
         The amount of seconds to wait for a cooldown when it's been triggered.
-    type: Union[:class:`.BucketType`, Callable[[:class:`.Message`], Any]]
+    type: Union[:class:`.BucketType`, Callable[[:class:`.Context`], Any]]
         The type of cooldown to have. If callable, should return a key for the mapping.
 
         .. versionchanged:: 1.7
             Callables are now supported for custom bucket types.
+
+        .. versionchanged:: 2.0
+            When passing a callable, it now needs to accept :class:`.Context`
+            rather than :class:`~discord.Message` as its only argument.
     """
 
     def decorator(func: Union[Command, CoroFunc]) -> Union[Command, CoroFunc]:
@@ -2441,13 +2470,13 @@ def cooldown(
 
 
 def dynamic_cooldown(
-    cooldown: Union[BucketType, Callable[[Message], Any]],
-    type: BucketType,
+    cooldown: Callable[[Context[Any]], Optional[Cooldown]],
+    type: Union[BucketType, Callable[[Context[Any]], Any]],
 ) -> Callable[[T], T]:
     """A decorator that adds a dynamic cooldown to a :class:`.Command`
 
     This differs from :func:`.cooldown` in that it takes a function that
-    accepts a single parameter of type :class:`.discord.Message` and must
+    accepts a single parameter of type :class:`.Context` and must
     return a :class:`~discord.app_commands.Cooldown` or ``None``.
     If ``None`` is returned then that cooldown is effectively bypassed.
 
@@ -2466,7 +2495,7 @@ def dynamic_cooldown(
 
     Parameters
     ------------
-    cooldown: Callable[[:class:`.discord.Message`], Optional[:class:`~discord.app_commands.Cooldown`]]
+    cooldown: Callable[[:class:`.Context`], Optional[:class:`~discord.app_commands.Cooldown`]]
         A function that takes a message and returns a cooldown that will
         apply to this invocation or ``None`` if the cooldown should be bypassed.
     type: :class:`.BucketType`

@@ -43,6 +43,7 @@ from typing import (
     Union,
     runtime_checkable,
 )
+import types
 
 import discord
 
@@ -154,7 +155,7 @@ class IDConverter(Converter[T_co]):
 class ObjectConverter(IDConverter[discord.Object]):
     """Converts to a :class:`~discord.Object`.
 
-    The argument must follow the valid ID or mention formats (e.g. `<@80088516616269824>`).
+    The argument must follow the valid ID or mention formats (e.g. ``<@80088516616269824>``).
 
     .. versionadded:: 2.0
 
@@ -566,7 +567,7 @@ class CategoryChannelConverter(IDConverter[discord.CategoryChannel]):
 
 
 class ThreadConverter(IDConverter[discord.Thread]):
-    """Coverts to a :class:`~discord.Thread`.
+    """Converts to a :class:`~discord.Thread`.
 
     All lookups are via the local guild.
 
@@ -675,7 +676,7 @@ class RoleConverter(IDConverter[discord.Role]):
 
 
 class GameConverter(Converter[discord.Game]):
-    """Converts to :class:`~discord.Game`."""
+    """Converts to a :class:`~discord.Game`."""
 
     async def convert(self, ctx: Context[BotT], argument: str) -> discord.Game:
         return discord.Game(name=argument)
@@ -1021,8 +1022,11 @@ class Greedy(List[T]):
             raise TypeError('Greedy[...] only takes a single argument')
         converter = params[0]
 
-        origin = getattr(converter, '__origin__', None)
         args = getattr(converter, '__args__', ())
+        if discord.utils.PY_310 and converter.__class__ is types.UnionType:  # type: ignore
+            converter = Union[args]  # type: ignore
+
+        origin = getattr(converter, '__origin__', None)
 
         if not (callable(converter) or isinstance(converter, Converter) or origin is not None):
             raise TypeError('Greedy[...] expects a type or a Converter instance.')
@@ -1035,14 +1039,25 @@ class Greedy(List[T]):
 
         return cls(converter=converter)
 
+    @property
+    def constructed_converter(self) -> Any:
+        # Only construct a converter once in order to maintain state between convert calls
+        if (
+            inspect.isclass(self.converter)
+            and issubclass(self.converter, Converter)
+            and not inspect.ismethod(self.converter.convert)
+        ):
+            return self.converter()
+        return self.converter
+
 
 if TYPE_CHECKING:
     from typing_extensions import Annotated as Range
 else:
 
     class Range:
-        """A special converter that can be applied to a parameter to require a numeric type
-        to fit within the range provided.
+        """A special converter that can be applied to a parameter to require a numeric
+        or string type to fit within the range provided.
 
         During type checking time this is equivalent to :obj:`typing.Annotated` so type checkers understand
         the intent of the code.
@@ -1052,8 +1067,14 @@ else:
         - ``Range[int, 10]`` means the minimum is 10 with no maximum.
         - ``Range[int, None, 10]`` means the maximum is 10 with no minimum.
         - ``Range[int, 1, 10]`` means the minimum is 1 and the maximum is 10.
+        - ``Range[float, 1.0, 5.0]`` means the minimum is 1.0 and the maximum is 5.0.
+        - ``Range[str, 1, 10]`` means the minimum length is 1 and the maximum length is 10.
 
         Inside a :class:`HybridCommand` this functions equivalently to :class:`discord.app_commands.Range`.
+
+        If the value cannot be converted to the provided type or is outside the given range,
+        :class:`~.ext.commands.BadArgument` or :class:`~.ext.commands.RangeError` is raised to
+        the appropriate error handlers respectively.
 
         .. versionadded:: 2.0
 
@@ -1078,9 +1099,21 @@ else:
             self.min: Optional[Union[int, float]] = min
             self.max: Optional[Union[int, float]] = max
 
+            if min and max and min > max:
+                raise TypeError('minimum cannot be larger than maximum')
+
         async def convert(self, ctx: Context[BotT], value: str) -> Union[int, float]:
-            converted = self.annotation(value)
-            if (self.min is not None and converted < self.min) or (self.max is not None and converted > self.max):
+            try:
+                count = converted = self.annotation(value)
+            except ValueError:
+                raise BadArgument(
+                    f'Converting to "{self.annotation.__name__}" failed for parameter "{ctx.current_parameter.name}".'
+                )
+
+            if self.annotation is str:
+                count = len(value)
+
+            if (self.min is not None and count < self.min) or (self.max is not None and count > self.max):
                 raise RangeError(converted, minimum=self.min, maximum=self.max)
 
             return converted
@@ -1089,9 +1122,15 @@ else:
             # Trick to allow it inside typing.Union
             pass
 
+        def __or__(self, rhs) -> Any:
+            return Union[self, rhs]
+
+        def __repr__(self) -> str:
+            return f'{self.__class__.__name__}[{self.annotation.__name__}, {self.min}, {self.max}]'
+
         def __class_getitem__(cls, obj) -> Range:
             if not isinstance(obj, tuple):
-                raise TypeError(f'expected tuple for arguments, received {obj.__class__!r} instead')
+                raise TypeError(f'expected tuple for arguments, received {obj.__class__.__name__} instead')
 
             if len(obj) == 2:
                 obj = (*obj, None)
@@ -1108,13 +1147,18 @@ else:
                 if type(min) != type(max):
                     raise TypeError('Both min and max in Range must be the same type')
 
-            if annotation not in (int, float):
-                raise TypeError(f'expected int or float as range type, received {annotation!r} instead')
+            if annotation not in (int, float, str):
+                raise TypeError(f'expected int, float, or str as range type, received {annotation!r} instead')
+
+            if annotation in (str, int):
+                cast = int
+            else:
+                cast = float
 
             return cls(
                 annotation=annotation,
-                min=annotation(min) if min is not None else None,
-                max=annotation(max) if max is not None else None,
+                min=cast(min) if min is not None else None,
+                max=cast(max) if max is not None else None,
             )
 
 
@@ -1177,7 +1221,7 @@ async def _actual_conversion(ctx: Context[BotT], converter: Any, argument: str, 
             if inspect.ismethod(converter.convert):
                 return await converter.convert(ctx, argument)
             else:
-                return await converter().convert(ctx, argument)  # type: ignore
+                return await converter().convert(ctx, argument)
         elif isinstance(converter, Converter):
             return await converter.convert(ctx, argument)  # type: ignore
     except CommandError:
@@ -1286,7 +1330,7 @@ async def run_converters(ctx: Context[BotT], converter: Any, argument: str, para
                 return value
 
         # if we're here, then we failed to match all the literals
-        raise BadLiteralArgument(param, literal_args, errors)
+        raise BadLiteralArgument(param, literal_args, errors, argument)
 
     # This must be the last if-clause in the chain of origin checking
     # Nearly every type is a generic type within the typing library

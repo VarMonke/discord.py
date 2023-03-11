@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Dict, Generator, Generic, List, Optional,
 
 import discord.abc
 import discord.utils
-from discord import Interaction, Message, Attachment, MessageType, User, PartialMessageable
+from discord import Interaction, Message, Attachment, MessageType, User, PartialMessageable, Permissions, ChannelType, Thread
 from discord.context_managers import Typing
 from .view import StringView
 
@@ -190,7 +190,7 @@ class Context(discord.abc.Messageable, Generic[BotT]):
         command_failed: bool = False,
         current_parameter: Optional[Parameter] = None,
         current_argument: Optional[str] = None,
-        interaction: Optional[Interaction] = None,
+        interaction: Optional[Interaction[BotT]] = None,
     ):
         self.message: Message = message
         self.bot: BotT = bot
@@ -206,11 +206,11 @@ class Context(discord.abc.Messageable, Generic[BotT]):
         self.command_failed: bool = command_failed
         self.current_parameter: Optional[Parameter] = current_parameter
         self.current_argument: Optional[str] = current_argument
-        self.interaction: Optional[Interaction] = interaction
+        self.interaction: Optional[Interaction[BotT]] = interaction
         self._state: ConnectionState = self.message._state
 
     @classmethod
-    async def from_interaction(cls, interaction: Interaction, /) -> Self:
+    async def from_interaction(cls, interaction: Interaction[BotT], /) -> Self:
         """|coro|
 
         Creates a context from a :class:`discord.Interaction`. This only
@@ -295,6 +295,7 @@ class Context(discord.abc.Messageable, Generic[BotT]):
             command=command,  # type: ignore # this will be a hybrid command, technically
         )
         interaction._baton = ctx
+        ctx.command_failed = interaction.command_failed
         return ctx
 
     async def invoke(self, command: Command[CogT, P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
@@ -455,6 +456,76 @@ class Context(discord.abc.Messageable, Generic[BotT]):
         """
         # bot.user will never be None at this point.
         return self.guild.me if self.guild is not None else self.bot.user  # type: ignore
+
+    @discord.utils.cached_property
+    def permissions(self) -> Permissions:
+        """:class:`.Permissions`: Returns the resolved permissions for the invoking user in this channel.
+        Shorthand for :meth:`.abc.GuildChannel.permissions_for` or :attr:`.Interaction.permissions`.
+
+        .. versionadded:: 2.0
+        """
+        if self.channel.type is ChannelType.private:
+            return Permissions._dm_permissions()
+        if not self.interaction:
+            # channel and author will always match relevant types here
+            return self.channel.permissions_for(self.author)  # type: ignore
+        base = self.interaction.permissions
+        if self.channel.type in (ChannelType.voice, ChannelType.stage_voice):
+            if not base.connect:
+                # voice channels cannot be edited by people who can't connect to them
+                # It also implicitly denies all other voice perms
+                denied = Permissions.voice()
+                denied.update(manage_channels=True, manage_roles=True)
+                base.value &= ~denied.value
+        else:
+            # text channels do not have voice related permissions
+            denied = Permissions.voice()
+            base.value &= ~denied.value
+        return base
+
+    @discord.utils.cached_property
+    def bot_permissions(self) -> Permissions:
+        """:class:`.Permissions`: Returns the resolved permissions for the bot in this channel.
+        Shorthand for :meth:`.abc.GuildChannel.permissions_for` or :attr:`.Interaction.app_permissions`.
+
+        For interaction-based commands, this will reflect the effective permissions
+        for :class:`Context` calls, which may differ from calls through
+        other :class:`.abc.Messageable` endpoints, like :attr:`channel`.
+
+        Notably, sending messages, embedding links, and attaching files are always
+        permitted, while reading messages might not be.
+
+        .. versionadded:: 2.0
+        """
+        channel = self.channel
+        if channel.type == ChannelType.private:
+            return Permissions._dm_permissions()
+        if not self.interaction:
+            # channel and me will always match relevant types here
+            return channel.permissions_for(self.me)  # type: ignore
+        guild = channel.guild
+        base = self.interaction.app_permissions
+        if self.channel.type in (ChannelType.voice, ChannelType.stage_voice):
+            if not base.connect:
+                # voice channels cannot be edited by people who can't connect to them
+                # It also implicitly denies all other voice perms
+                denied = Permissions.voice()
+                denied.update(manage_channels=True, manage_roles=True)
+                base.value &= ~denied.value
+        else:
+            # text channels do not have voice related permissions
+            denied = Permissions.voice()
+            base.value &= ~denied.value
+        base.update(
+            embed_links=True,
+            attach_files=True,
+            send_tts_messages=False,
+        )
+        if isinstance(channel, Thread):
+            base.send_messages_in_threads = True
+        else:
+            base.send_messages = True
+        return base
 
     @property
     def voice_client(self) -> Optional[VoiceProtocol]:
@@ -663,6 +734,7 @@ class Context(discord.abc.Messageable, Generic[BotT]):
         view: Optional[View] = None,
         suppress_embeds: bool = False,
         ephemeral: bool = False,
+        silent: bool = False,
     ) -> Message:
         """|coro|
 
@@ -698,7 +770,7 @@ class Context(discord.abc.Messageable, Generic[BotT]):
         delete_after: :class:`float`
             If provided, the number of seconds to wait in the background
             before deleting the message we just sent. If the deletion fails,
-            then it is silently ignored. This is ignored for interaction based contexts.
+            then it is silently ignored.
         allowed_mentions: :class:`~discord.AllowedMentions`
             Controls the mentions being processed in this message. If this is
             passed, then the object is merged with :attr:`~discord.Client.allowed_mentions`.
@@ -746,6 +818,11 @@ class Context(discord.abc.Messageable, Generic[BotT]):
             is set to 15 minutes. **This is only applicable in contexts with an interaction**.
 
             .. versionadded:: 2.0
+        silent: :class:`bool`
+            Whether to suppress push and desktop notifications for the message. This will increment the mention counter
+            in the UI, but will not actually send a notification.
+
+            .. versionadded:: 2.2
 
         Raises
         --------
@@ -783,6 +860,7 @@ class Context(discord.abc.Messageable, Generic[BotT]):
                 mention_author=mention_author,
                 view=view,
                 suppress_embeds=suppress_embeds,
+                silent=silent,
             )  # type: ignore # The overloads don't support Optional but the implementation does
 
         # Convert the kwargs from None to MISSING to appease the remaining implementations
@@ -797,14 +875,15 @@ class Context(discord.abc.Messageable, Generic[BotT]):
             'view': MISSING if view is None else view,
             'suppress_embeds': suppress_embeds,
             'ephemeral': ephemeral,
+            'silent': silent,
         }
 
         if self.interaction.response.is_done():
             msg = await self.interaction.followup.send(**kwargs, wait=True)
         else:
             await self.interaction.response.send_message(**kwargs)
-            msg = await self.interaction.original_message()
+            msg = await self.interaction.original_response()
 
-        if delete_after is not None and not (ephemeral and self.interaction is not None):
+        if delete_after is not None:
             await msg.delete(delay=delete_after)
         return msg

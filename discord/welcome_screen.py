@@ -62,7 +62,9 @@ class WelcomeChannel:
         The emoji used beside the channel description.
     """
 
-    def __init__(self, *, channel: Snowflake, description: str, emoji: Optional[Union[PartialEmoji, Emoji, str]] = None):
+    def __init__(
+        self, *, channel: Snowflake, description: str, emoji: Optional[Union[PartialEmoji, Emoji, str]] = None
+    ) -> None:
         self.channel = channel
         self.description = description
         self.emoji = emoji
@@ -120,7 +122,7 @@ class WelcomeScreen:
         The channels shown on the welcome screen.
     """
 
-    def __init__(self, *, data: WelcomeScreenPayload, guild: Guild):
+    def __init__(self, *, data: WelcomeScreenPayload, guild: Guild) -> None:
         self._state = guild._state
         self._guild = guild
         self._store(data)
@@ -158,8 +160,7 @@ class WelcomeScreen:
 
         Welcome channels can only accept custom emojis if :attr:`Guild.premium_tier` is level 2 or above.
 
-        You must have the :attr:`~Permissions.manage_guild` permission in the
-        guild to do this.
+        You must have :attr:`~Permissions.manage_guild` in the guild to do this.
 
         Usage: ::
 

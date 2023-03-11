@@ -196,7 +196,6 @@ class Activity(BaseActivity):
     __slots__ = (
         'state',
         'details',
-        '_created_at',
         'timestamps',
         'assets',
         'party',
@@ -822,7 +821,7 @@ def create_activity(data: Optional[ActivityPayload], state: ConnectionState) -> 
         return Game(**data)
     elif game_type is ActivityType.custom:
         try:
-            name = data.pop('name')
+            name = data.pop('name')  # type: ignore
         except KeyError:
             ret = Activity(**data)
         else:

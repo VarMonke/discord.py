@@ -160,8 +160,9 @@ class ButtonMessageComponentInteractionData(_BaseMessageComponentInteractionData
 
 
 class SelectMessageComponentInteractionData(_BaseMessageComponentInteractionData):
-    component_type: Literal[3]
+    component_type: Literal[3, 5, 6, 7, 8]
     values: List[str]
+    resolved: NotRequired[ResolvedData]
 
 
 MessageComponentInteractionData = Union[ButtonMessageComponentInteractionData, SelectMessageComponentInteractionData]
@@ -203,6 +204,7 @@ class _BaseInteraction(TypedDict):
     version: Literal[1]
     guild_id: NotRequired[Snowflake]
     channel_id: NotRequired[Snowflake]
+    app_permissions: NotRequired[str]
     locale: NotRequired[str]
     guild_locale: NotRequired[str]
 

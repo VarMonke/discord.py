@@ -71,6 +71,11 @@ class Namespace:
     with the name of ``example`` can be accessed using ``ns.example``. If an attribute is not found,
     then ``None`` is returned rather than an attribute error.
 
+    .. warning::
+
+        The key names come from the raw Discord data, which means that if a parameter was renamed then the
+        renamed key is used instead of the function parameter name.
+
     .. versionadded:: 2.0
 
     .. container:: operations
@@ -137,15 +142,21 @@ class Namespace:
         for option in options:
             opt_type = option['type']
             name = option['name']
+            focused = option.get('focused', False)
             if opt_type in (3, 4, 5):  # string, integer, boolean
                 value = option['value']  # type: ignore # Key is there
                 self.__dict__[name] = value
             elif opt_type == 10:  # number
                 value = option['value']  # type: ignore # Key is there
-                if value is None:
+                # This condition is written this way because 0 can be a valid float
+                if value is None or value == '':
                     self.__dict__[name] = float('nan')
                 else:
-                    self.__dict__[name] = float(value)
+                    if not focused:
+                        self.__dict__[name] = float(value)
+                    else:
+                        # Autocomplete focused values tend to be garbage in
+                        self.__dict__[name] = value
             elif opt_type in (6, 7, 8, 9, 11):
                 # Remaining ones should be snowflake based ones with resolved data
                 snowflake: str = option['value']  # type: ignore # Key is there

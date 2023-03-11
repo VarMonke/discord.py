@@ -153,7 +153,6 @@ The following have been changed to :func:`runtime-checkable <typing.runtime_chec
 
 - :class:`abc.Snowflake`
 - :class:`abc.User`
-- :class:`abc.PrivateChannel`
 
 The following have been changed to subclass :class:`~typing.Protocol`:
 
@@ -163,6 +162,7 @@ The following have been changed to subclass :class:`~typing.Protocol`:
 The following have been changed to use the default metaclass instead of :class:`abc.ABCMeta`:
 
 - :class:`abc.Messageable`
+- :class:`abc.PrivateChannel`
 
 ``datetime`` Objects Are Now UTC-Aware
 ----------------------------------------
@@ -255,7 +255,7 @@ The following now accept aware :class:`~datetime.datetime` and assume that if th
 - :attr:`Embed` constructor
 - :attr:`Embed.timestamp` property setter
 - :func:`utils.sleep_until` function
-- ``utils.time_snowflake`` function
+- :func:`utils.time_snowflake` function
 
 Currently, there's only one place in this library that doesn't accept naive :class:`datetime.datetime` objects:
 
@@ -864,22 +864,47 @@ The return type of the following methods has been changed to an :term:`asynchron
 The ``NoMoreItems`` exception was removed as calling :func:`anext` or :meth:`~object.__anext__` on an
 :term:`asynchronous iterator` will now raise :class:`StopAsyncIteration`.
 
-Removal of ``Embed.Empty``
----------------------------
+Changing certain lists to be lazy sequences instead
+-----------------------------------------------------
+
+In order to improve performance when calculating the length of certain lists, certain attributes were changed to return a sequence rather than a :class:`list`.
+
+A sequence is similar to a :class:`list` except it is read-only. In order to get a list again you can call :class:`list` on the resulting sequence.
+
+The following properties were changed to return a sequence instead of a list:
+
+- :attr:`Client.guilds`
+- :attr:`Client.emojis`
+- :attr:`Client.private_channels`
+- :attr:`Guild.roles`
+- :attr:`Guild.channels`
+- :attr:`Guild.members`
+
+This change should be transparent, unless you are modifying the sequence by doing things such as ``list.append``.
+
+
+Embed Changes
+--------------
 
 Originally, embeds used a special sentinel to denote emptiness or remove an attribute from display. The ``Embed.Empty`` sentinel was made when Discord's embed design was in a nebulous state of flux. Since then, the embed design has stabilised and thus the sentinel is seen as legacy.
 
 Therefore, ``Embed.Empty`` has been removed in favour of ``None``.
+
+Additionally, ``Embed.__eq__`` has been implemented thus embeds becoming unhashable (e.g. using them in sets or dict keys).
 
 .. code-block:: python
 
     # before
     embed = discord.Embed(title='foo')
     embed.title = discord.Embed.Empty
+    embed == embed.copy() # False
 
     # after
     embed = discord.Embed(title='foo')
     embed.title = None
+    embed == embed.copy() # True
+    {embed, embed} # Raises TypeError
+
 
 
 Removal of ``InvalidArgument`` Exception
@@ -941,13 +966,24 @@ The library now provides a default logging configuration if using :meth:`Client.
 - :meth:`Client.on_error`
 - :meth:`discord.ext.tasks.Loop.error`
 - :meth:`discord.ext.commands.Bot.on_command_error`
+- :meth:`VoiceClient.play`
 
 For more information, check :doc:`logging`.
+
+Text in Voice
+---------------
+
+In order to support text in voice functionality, a few changes had to be made:
+
+- :class:`VoiceChannel` is now :class:`abc.Messageable` so it can have messages sent and received.
+- :attr:`Message.channel` can now be :class:`VoiceChannel`.
+
+In the future this may include :class:`StageChannel` when Discord implements it.
 
 Removal of ``StoreChannel``
 -----------------------------
 
-Discord's API has removed store channels as of `March 10th, 2022 <https://support-dev.discord.com/hc/en-us/articles/4414590563479>`_. Therefore, the library has removed support for it as well.
+Discord's API has removed store channels as of `March 10th, 2022 <https://support-dev.discord.com/hc/en-us/articles/6309018858647>`_. Therefore, the library has removed support for it as well.
 
 This removes the following:
 
@@ -1002,19 +1038,22 @@ Parameters in the following methods are now all positional-only:
 - :meth:`TextChannel.get_partial_message`
 - :meth:`TextChannel.delete_messages`
 - :meth:`Webhook.delete_message`
-- :meth:`utils.find`
+- :func:`utils.find`
+- :func:`utils.snowflake_time`
 
 The following parameters are now positional-only:
 
-- ``iterable`` in :meth:`utils.get`
+- ``iterable`` in :func:`utils.get`
 - ``event_method`` in :meth:`Client.on_error`
 - ``event`` in :meth:`Client.wait_for`
+- ``dt`` in :func:`utils.time_snowflake`
 
 The following are now keyword-only:
 
 - Parameters in :meth:`Reaction.users`
 - Parameters in :meth:`Client.create_guild`
-- ``permissions``, ``guild``, ``redirect_uri``, and ``scopes`` parameters in :meth:`utils.oauth_url`
+- ``permissions``, ``guild``, ``redirect_uri``, and ``scopes`` parameters in :func:`utils.oauth_url`
+- ``high`` in :func:`utils.snowflake_time`
 
 The library now less often uses ``None`` as the default value for function/method parameters.
 
@@ -1083,6 +1122,7 @@ The following changes have been made:
 - :attr:`AuditLogEntry.target` may now be a :class:`PartialMessageable`.
 - :attr:`PartialMessage.channel` may now be a :class:`PartialMessageable`.
 - :attr:`Guild.preferred_locale` is now of type :class:`Locale`.
+- :attr:`abc.GuildChannel.overwrites` keys can now have :class:`Object` in them.
 
 Removals
 ----------
@@ -1227,7 +1267,7 @@ The following changes have been made:
 
 - :meth:`Permissions.stage_moderator` now includes the :attr:`Permissions.manage_channels` permission and the :attr:`Permissions.request_to_speak` permission is no longer included.
 
-- :attr:`File.filename` will no longer be ``None``, in situations where previously this was the case the filename is set to `'untitled'`.
+- :attr:`File.filename` will no longer be ``None``, in situations where previously this was the case the filename is set to ``'untitled'``.
 
 - :attr:`Message.application` will no longer be a raw :class:`dict` of the API payload and now returns an instance of :class:`MessageApplication`.
 
@@ -1432,6 +1472,8 @@ Miscellaneous Changes
 
     - To override a cog, the new ``override`` parameter can be used.
 
+- When passing a callable to ``type`` argument of :meth:`~ext.commands.cooldown`,
+  it now needs to accept :class:`~ext.commands.Context` rather than :class:`Message` as its only argument.
 - Metaclass of :class:`~ext.commands.Context` changed from :class:`abc.ABCMeta` to :class:`type`.
 - Changed type of :attr:`ext.commands.Command.clean_params` from :class:`collections.OrderedDict` to :class:`dict`.
   As the latter is guaranteed to preserve insertion order since Python 3.7.

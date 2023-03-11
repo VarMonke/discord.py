@@ -26,11 +26,14 @@ from __future__ import annotations
 from datetime import datetime
 
 from .errors import MissingApplicationID
+from .translator import TranslationContextLocation, TranslationContext, locale_str, Translator
 from ..permissions import Permissions
-from ..enums import AppCommandOptionType, AppCommandType, AppCommandPermissionType, ChannelType, try_enum
+from ..enums import AppCommandOptionType, AppCommandType, AppCommandPermissionType, ChannelType, Locale, try_enum
 from ..mixins import Hashable
 from ..utils import _get_as_snowflake, parse_time, snowflake_time, MISSING
 from ..object import Object
+from ..role import Role
+from ..member import Member
 
 from typing import Any, Dict, Generic, List, TYPE_CHECKING, Optional, TypeVar, Union
 
@@ -56,8 +59,8 @@ def is_app_command_argument_type(value: int) -> bool:
 if TYPE_CHECKING:
     from ..types.command import (
         ApplicationCommand as ApplicationCommandPayload,
-        ApplicationCommandOptionChoice,
         ApplicationCommandOption,
+        ApplicationCommandOptionChoice,
         ApplicationCommandPermissions,
         GuildApplicationCommandPermissions,
     )
@@ -75,9 +78,7 @@ if TYPE_CHECKING:
     from ..guild import GuildChannel, Guild
     from ..channel import TextChannel
     from ..threads import Thread
-    from ..role import Role
     from ..user import User
-    from ..member import Member
 
     ApplicationCommandParent = Union['AppCommand', 'AppCommandGroup']
 
@@ -107,8 +108,12 @@ class AllChannels:
         return f'<AllChannels guild={self.guild}>'
 
 
+def _to_locale_dict(data: Dict[str, str]) -> Dict[Locale, str]:
+    return {try_enum(Locale, key): value for key, value in data.items()}
+
+
 class AppCommand(Hashable):
-    """Represents a application command.
+    """Represents an application command.
 
     In common parlance this is referred to as a "Slash Command" or a
     "Context Menu Command".
@@ -145,7 +150,11 @@ class AppCommand(Hashable):
         The application command's name.
     description: :class:`str`
         The application command's description.
-    options: List[Union[:class:`AppCommand`, :class:`AppCommandGroup`]]
+    name_localizations: Dict[:class:`~discord.Locale`, :class:`str`]
+        The localised names of the application command. Used for display purposes.
+    description_localizations: Dict[:class:`~discord.Locale`, :class:`str`]
+        The localised descriptions of the application command. Used for display purposes.
+    options: List[Union[:class:`Argument`, :class:`AppCommandGroup`]]
         A list of options.
     default_member_permissions: Optional[:class:`~discord.Permissions`]
         The default member permissions that can run this command.
@@ -164,6 +173,8 @@ class AppCommand(Hashable):
         'application_id',
         'name',
         'description',
+        'name_localizations',
+        'description_localizations',
         'guild_id',
         'options',
         'default_member_permissions',
@@ -200,6 +211,8 @@ class AppCommand(Hashable):
 
         self.dm_permission: bool = dm_permission
         self.nsfw: bool = data.get('nsfw', False)
+        self.name_localizations: Dict[Locale, str] = _to_locale_dict(data.get('name_localizations') or {})
+        self.description_localizations: Dict[Locale, str] = _to_locale_dict(data.get('description_localizations') or {})
 
     def to_dict(self) -> ApplicationCommandPayload:
         return {
@@ -208,6 +221,8 @@ class AppCommand(Hashable):
             'application_id': self.application_id,
             'name': self.name,
             'description': self.description,
+            'name_localizations': {str(k): v for k, v in self.name_localizations.items()},
+            'description_localizations': {str(k): v for k, v in self.description_localizations.items()},
             'options': [opt.to_dict() for opt in self.options],
         }  # type: ignore # Type checker does not understand this literal.
 
@@ -216,6 +231,11 @@ class AppCommand(Hashable):
 
     def __repr__(self) -> str:
         return f'<{self.__class__.__name__} id={self.id!r} name={self.name!r} type={self.type!r}>'
+
+    @property
+    def mention(self) -> str:
+        """:class:`str`: Returns a string that allows you to mention the given AppCommand."""
+        return f'</{self.name}:{self.id}>'
 
     @property
     def guild(self) -> Optional[Guild]:
@@ -402,17 +422,32 @@ class Choice(Generic[ChoiceT]):
 
     Parameters
     -----------
-    name: :class:`str`
+    name: Union[:class:`str`, :class:`locale_str`]
         The name of the choice. Used for display purposes.
+        Can only be up to 100 characters.
+    name_localizations: Dict[:class:`~discord.Locale`, :class:`str`]
+        The localised names of the choice. Used for display purposes.
     value: Union[:class:`int`, :class:`str`, :class:`float`]
-        The value of the choice.
+        The value of the choice. If it's a string, it can only be
+        up to 100 characters long.
     """
 
-    __slots__ = ('name', 'value')
+    __slots__ = ('name', 'value', '_locale_name', 'name_localizations')
 
-    def __init__(self, *, name: str, value: ChoiceT):
+    def __init__(self, *, name: Union[str, locale_str], value: ChoiceT):
+        name, locale = (name.message, name) if isinstance(name, locale_str) else (name, None)
         self.name: str = name
+        self._locale_name: Optional[locale_str] = locale
         self.value: ChoiceT = value
+        self.name_localizations: Dict[Locale, str] = {}
+
+    @classmethod
+    def from_dict(cls, data: ApplicationCommandOptionChoice) -> Choice[ChoiceT]:
+        self = cls.__new__(cls)
+        self.name = data['name']
+        self.value = data['value']  # type: ignore # This seems to break every other pyright release
+        self.name_localizations = _to_locale_dict(data.get('name_localizations') or {})
+        return self
 
     def __eq__(self, o: object) -> bool:
         return isinstance(o, Choice) and self.name == o.name and self.value == o.value
@@ -433,14 +468,42 @@ class Choice(Generic[ChoiceT]):
             return AppCommandOptionType.string
         else:
             raise TypeError(
-                f'invalid Choice value type given, expected int, str, or float but received {self.value.__class__!r}'
+                f'invalid Choice value type given, expected int, str, or float but received {self.value.__class__.__name__}'
             )
 
-    def to_dict(self) -> ApplicationCommandOptionChoice:
-        return {
+    async def get_translated_payload(self, translator: Translator) -> Dict[str, Any]:
+        base = self.to_dict()
+        name_localizations: Dict[str, str] = {}
+        context = TranslationContext(location=TranslationContextLocation.choice_name, data=self)
+        if self._locale_name:
+            for locale in Locale:
+                translation = await translator._checked_translate(self._locale_name, locale, context)
+                if translation is not None:
+                    name_localizations[locale.value] = translation
+
+        if name_localizations:
+            base['name_localizations'] = name_localizations
+
+        return base
+
+    async def get_translated_payload_for_locale(self, translator: Translator, locale: Locale) -> Dict[str, Any]:
+        base = self.to_dict()
+        if self._locale_name:
+            context = TranslationContext(location=TranslationContextLocation.choice_name, data=self)
+            translation = await translator._checked_translate(self._locale_name, locale, context)
+            if translation is not None:
+                base['name'] = translation
+
+        return base
+
+    def to_dict(self) -> Dict[str, Any]:
+        base = {
             'name': self.name,
             'value': self.value,
         }
+        if self.name_localizations:
+            base['name_localizations'] = {str(k): v for k, v in self.name_localizations.items()}
+        return base
 
 
 class AppCommandChannel(Hashable):
@@ -727,7 +790,7 @@ class AppCommandThread(Hashable):
 
 
 class Argument:
-    """Represents a application command argument.
+    """Represents an application command argument.
 
     .. versionadded:: 2.0
 
@@ -739,6 +802,10 @@ class Argument:
         The name of the argument.
     description: :class:`str`
         The description of the argument.
+    name_localizations: Dict[:class:`~discord.Locale`, :class:`str`]
+        The localised names of the argument. Used for display purposes.
+    description_localizations: Dict[:class:`~discord.Locale`, :class:`str`]
+        The localised descriptions of the argument. Used for display purposes.
     required: :class:`bool`
         Whether the argument is required.
     choices: List[:class:`Choice`]
@@ -751,6 +818,10 @@ class Argument:
         The minimum supported value for this parameter.
     max_value: Optional[Union[:class:`int`, :class:`float`]]
         The maximum supported value for this parameter.
+    min_length: Optional[:class:`int`]
+        The minimum allowed length for this parameter.
+    max_length: Optional[:class:`int`]
+        The maximum allowed length for this parameter.
     autocomplete: :class:`bool`
         Whether the argument has autocomplete.
     """
@@ -759,11 +830,15 @@ class Argument:
         'type',
         'name',
         'description',
+        'name_localizations',
+        'description_localizations',
         'required',
         'choices',
         'channel_types',
         'min_value',
         'max_value',
+        'min_length',
+        'max_length',
         'autocomplete',
         'parent',
         '_state',
@@ -786,11 +861,13 @@ class Argument:
         self.required: bool = data.get('required', False)
         self.min_value: Optional[Union[int, float]] = data.get('min_value')
         self.max_value: Optional[Union[int, float]] = data.get('max_value')
+        self.min_length: Optional[int] = data.get('min_length')
+        self.max_length: Optional[int] = data.get('max_length')
         self.autocomplete: bool = data.get('autocomplete', False)
         self.channel_types: List[ChannelType] = [try_enum(ChannelType, d) for d in data.get('channel_types', [])]
-        self.choices: List[Choice[Union[int, float, str]]] = [
-            Choice(name=d['name'], value=d['value']) for d in data.get('choices', [])
-        ]
+        self.choices: List[Choice[Union[int, float, str]]] = [Choice.from_dict(d) for d in data.get('choices', [])]
+        self.name_localizations: Dict[Locale, str] = _to_locale_dict(data.get('name_localizations') or {})
+        self.description_localizations: Dict[Locale, str] = _to_locale_dict(data.get('description_localizations') or {})
 
     def to_dict(self) -> ApplicationCommandOption:
         return {
@@ -802,13 +879,17 @@ class Argument:
             'channel_types': [channel_type.value for channel_type in self.channel_types],
             'min_value': self.min_value,
             'max_value': self.max_value,
+            'min_length': self.min_length,
+            'max_length': self.max_length,
             'autocomplete': self.autocomplete,
             'options': [],
+            'name_localizations': {str(k): v for k, v in self.name_localizations.items()},
+            'description_localizations': {str(k): v for k, v in self.description_localizations.items()},
         }  # type: ignore # Type checker does not understand this literal.
 
 
 class AppCommandGroup:
-    """Represents a application command subcommand.
+    """Represents an application command subcommand.
 
     .. versionadded:: 2.0
 
@@ -820,7 +901,11 @@ class AppCommandGroup:
         The name of the subcommand.
     description: :class:`str`
         The description of the subcommand.
-    options: List[Union[:class:`AppCommand`, :class:`AppCommandGroup`]]
+    name_localizations: Dict[:class:`~discord.Locale`, :class:`str`]
+        The localised names of the subcommand. Used for display purposes.
+    description_localizations: Dict[:class:`~discord.Locale`, :class:`str`]
+        The localised descriptions of the subcommand. Used for display purposes.
+    options: List[Union[:class:`Argument`, :class:`AppCommandGroup`]]
         A list of options.
     parent: Union[:class:`AppCommand`, :class:`AppCommandGroup`]
         The parent application command.
@@ -830,6 +915,8 @@ class AppCommandGroup:
         'type',
         'name',
         'description',
+        'name_localizations',
+        'description_localizations',
         'options',
         'parent',
         '_state',
@@ -845,6 +932,32 @@ class AppCommandGroup:
     def __repr__(self) -> str:
         return f'<{self.__class__.__name__} name={self.name!r} type={self.type!r}>'
 
+    @property
+    def qualified_name(self) -> str:
+        """:class:`str`: Returns the fully qualified command name.
+
+        The qualified name includes the parent name as well. For example,
+        in a command like ``/foo bar`` the qualified name is ``foo bar``.
+        """
+        # A B C
+        #     ^ self
+        #   ^ parent
+        # ^ grandparent
+        names = [self.name, self.parent.name]
+        if isinstance(self.parent, AppCommandGroup):
+            names.append(self.parent.parent.name)
+
+        return ' '.join(reversed(names))
+
+    @property
+    def mention(self) -> str:
+        """:class:`str`: Returns a string that allows you to mention the given AppCommandGroup."""
+        if isinstance(self.parent, AppCommand):
+            base_command = self.parent
+        else:
+            base_command = self.parent.parent
+        return f'</{self.qualified_name}:{base_command.id}>'  # type: ignore
+
     def _from_data(self, data: ApplicationCommandOption) -> None:
         self.type: AppCommandOptionType = try_enum(AppCommandOptionType, data['type'])
         self.name: str = data['name']
@@ -852,6 +965,8 @@ class AppCommandGroup:
         self.options: List[Union[Argument, AppCommandGroup]] = [
             app_command_option_factory(data=d, parent=self, state=self._state) for d in data.get('options', [])
         ]
+        self.name_localizations: Dict[Locale, str] = _to_locale_dict(data.get('name_localizations') or {})
+        self.description_localizations: Dict[Locale, str] = _to_locale_dict(data.get('description_localizations') or {})
 
     def to_dict(self) -> 'ApplicationCommandOption':
         return {
@@ -859,6 +974,8 @@ class AppCommandGroup:
             'type': self.type.value,
             'description': self.description,
             'options': [arg.to_dict() for arg in self.options],
+            'name_localizations': {str(k): v for k, v in self.name_localizations.items()},
+            'description_localizations': {str(k): v for k, v in self.description_localizations.items()},
         }  # type: ignore # Type checker does not understand this literal.
 
 
@@ -894,9 +1011,11 @@ class AppCommandPermissions:
         self.permission: bool = data['permission']
 
         _object = None
+        _type = MISSING
 
         if self.type is AppCommandPermissionType.user:
             _object = guild.get_member(self.id) or self._state.get_user(self.id)
+            _type = Member
         elif self.type is AppCommandPermissionType.channel:
             if self.id == (guild.id - 1):
                 _object = AllChannels(guild)
@@ -904,9 +1023,10 @@ class AppCommandPermissions:
                 _object = guild.get_channel(self.id)
         elif self.type is AppCommandPermissionType.role:
             _object = guild.get_role(self.id)
+            _type = Role
 
         if _object is None:
-            _object = Object(id=self.id)
+            _object = Object(id=self.id, type=_type)
 
         self.target: Union[Object, User, Member, Role, AllChannels, GuildChannel] = _object
 

@@ -27,7 +27,6 @@ from typing import Any, Callable, ClassVar, Coroutine, Dict, Iterator, List, Opt
 from functools import partial
 from itertools import groupby
 
-import traceback
 import asyncio
 import logging
 import sys
@@ -158,6 +157,8 @@ class View:
     __view_children_items__: ClassVar[List[ItemCallbackType[Any, Any]]] = []
 
     def __init_subclass__(cls) -> None:
+        super().__init_subclass__()
+
         children: Dict[str, ItemCallbackType[Any, Any]] = {}
         for base in reversed(cls.__mro__):
             for name, member in base.__dict__.items():
@@ -281,8 +282,19 @@ class View:
             one of its subclasses.
         """
         view = View(timeout=timeout)
-        for component in _walk_all_components(message.components):  # type: ignore
-            view.add_item(_component_to_item(component))
+        row = 0
+        for component in message.components:
+            if isinstance(component, ActionRowComponent):
+                for child in component.children:
+                    item = _component_to_item(child)
+                    item.row = row
+                    view.add_item(item)
+                row += 1
+            else:
+                item = _component_to_item(component)
+                item.row = row
+                view.add_item(item)
+
         return view
 
     def add_item(self, item: Item[Any]) -> Self:
@@ -309,7 +321,7 @@ class View:
             raise ValueError('maximum number of children exceeded')
 
         if not isinstance(item, Item):
-            raise TypeError(f'expected Item not {item.__class__!r}')
+            raise TypeError(f'expected Item not {item.__class__.__name__}')
 
         self.__weights.add_item(item)
 
@@ -347,7 +359,7 @@ class View:
         self.__weights.clear()
         return self
 
-    async def interaction_check(self, interaction: Interaction) -> bool:
+    async def interaction_check(self, interaction: Interaction, /) -> bool:
         """|coro|
 
         A callback that is called when an interaction happens within the view
@@ -382,13 +394,13 @@ class View:
         """
         pass
 
-    async def on_error(self, interaction: Interaction, error: Exception, item: Item[Any]) -> None:
+    async def on_error(self, interaction: Interaction, error: Exception, item: Item[Any], /) -> None:
         """|coro|
 
         A callback that is called when an item's callback or :meth:`interaction_check`
         fails with an error.
 
-        The default implementation prints the traceback to stderr.
+        The default implementation logs to the library logger.
 
         Parameters
         -----------
@@ -399,17 +411,18 @@ class View:
         item: :class:`Item`
             The item that failed the dispatch.
         """
-        print(f'Ignoring exception in view {self} for item {item}:', file=sys.stderr)
-        traceback.print_exception(error.__class__, error, error.__traceback__, file=sys.stderr)
+        _log.error('Ignoring exception in view %r for item %r', self, item, exc_info=error)
 
     async def _scheduled_task(self, item: Item, interaction: Interaction):
         try:
-            if self.timeout:
-                self.__timeout_expiry = time.monotonic() + self.timeout
+            item._refresh_state(interaction, interaction.data)  # type: ignore
 
             allow = await self.interaction_check(interaction)
             if not allow:
                 return
+
+            if self.timeout:
+                self.__timeout_expiry = time.monotonic() + self.timeout
 
             await item.callback(interaction)
         except Exception as e:
@@ -497,7 +510,9 @@ class View:
         return self.timeout is None and all(item.is_persistent() for item in self._children)
 
     async def wait(self) -> bool:
-        """Waits until the view has finished interacting.
+        """|coro|
+
+        Waits until the view has finished interacting.
 
         A view is considered finished when :meth:`stop` is called
         or it times out.
@@ -606,7 +621,6 @@ class ViewStore:
         if item is None:
             return
 
-        item._refresh_state(interaction.data)  # type: ignore
         # Note, at this point the View is *not* None
         item.view._dispatch_item(item, interaction)  # type: ignore
 
@@ -621,12 +635,12 @@ class ViewStore:
             _log.debug("Modal interaction referencing unknown custom_id %s. Discarding", custom_id)
             return
 
-        modal._refresh(components)
-        modal._dispatch_submit(interaction)
+        modal._dispatch_submit(interaction, components)
 
     def remove_interaction_mapping(self, interaction_id: int) -> None:
         # This is called before re-adding the view
         self._views.pop(interaction_id, None)
+        self._synced_message_views.pop(interaction_id, None)
 
     def is_message_tracked(self, message_id: int) -> bool:
         return message_id in self._synced_message_views

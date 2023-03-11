@@ -30,7 +30,7 @@ Some documentation to refer to:
 - We pull the token, endpoint and server_id from VOICE_SERVER_UPDATE.
 - Then we initiate the voice web socket (vWS) pointing to the endpoint.
 - We send opcode 0 with the user_id, server_id, session_id and token using the vWS.
-- The vWS sends back opcode 2 with an ssrc, port, modes(array) and hearbeat_interval.
+- The vWS sends back opcode 2 with an ssrc, port, modes(array) and heartbeat_interval.
 - We send a UDP discovery packet to endpoint:port and receive our IP and our port in LE.
 - Then we send our IP and port via vWS with opcode 1.
 - When that's all done, we receive opcode 4 from the vWS.
@@ -115,7 +115,7 @@ class VoiceProtocol:
         self.client: Client = client
         self.channel: abc.Connectable = channel
 
-    async def on_voice_state_update(self, data: GuildVoiceStatePayload) -> None:
+    async def on_voice_state_update(self, data: GuildVoiceStatePayload, /) -> None:
         """|coro|
 
         An abstract method that is called when the client's voice state
@@ -128,7 +128,7 @@ class VoiceProtocol:
         """
         raise NotImplementedError
 
-    async def on_voice_server_update(self, data: VoiceServerUpdatePayload) -> None:
+    async def on_voice_server_update(self, data: VoiceServerUpdatePayload, /) -> None:
         """|coro|
 
         An abstract method that is called when initially connecting to voice.
@@ -233,7 +233,7 @@ class VoiceClient(VoiceProtocol):
     secret_key: List[int]
     ssrc: int
 
-    def __init__(self, client: Client, channel: abc.Connectable):
+    def __init__(self, client: Client, channel: abc.Connectable) -> None:
         if not has_nacl:
             raise RuntimeError("PyNaCl library needed in order to use voice")
 
@@ -307,7 +307,7 @@ class VoiceClient(VoiceProtocol):
 
     async def on_voice_server_update(self, data: VoiceServerUpdatePayload) -> None:
         if self._voice_server_complete.is_set():
-            _log.info('Ignoring extraneous voice server update.')
+            _log.warning('Ignoring extraneous voice server update.')
             return
 
         self.token = data['token']
@@ -572,7 +572,10 @@ class VoiceClient(VoiceProtocol):
 
         If an error happens while the audio player is running, the exception is
         caught and the audio player is then stopped.  If no after callback is
-        passed, any caught exception will be displayed as if it were raised.
+        passed, any caught exception will be logged using the library logger.
+
+        .. versionchanged:: 2.0
+            Instead of writing to ``sys.stderr``, the library's logger is used.
 
         Parameters
         -----------

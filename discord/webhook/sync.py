@@ -188,9 +188,8 @@ class WebhookAdapter:
                         if remaining == '0' and response.status_code != 429:
                             delta = utils._parse_ratelimit_header(response)
                             _log.debug(
-                                'Webhook ID %s has exhausted its rate limit bucket (bucket: %s, retry: %s).',
+                                'Webhook ID %s has exhausted its rate limit bucket (retry: %s).',
                                 webhook_id,
-                                bucket,
                                 delta,
                             )
                             lock.delay_by(delta)
@@ -201,10 +200,10 @@ class WebhookAdapter:
                         if response.status_code == 429:
                             if not response.headers.get('Via'):
                                 raise HTTPException(response, data)
-                            fmt = 'Webhook ID %s is rate limited. Retrying in %.2f seconds. Handled under the bucket %s'
+                            fmt = 'Webhook ID %s is rate limited. Retrying in %.2f seconds.'
 
                             retry_after: float = data['retry_after']  # type: ignore
-                            _log.warning(fmt, webhook_id, retry_after, stack_info=True)
+                            _log.warning(fmt, webhook_id, retry_after)
                             time.sleep(retry_after)
                             continue
 
@@ -650,7 +649,7 @@ class SyncWebhook(BaseWebhook):
 
         if session is not MISSING:
             if not isinstance(session, requests.Session):
-                raise TypeError(f'expected requests.Session not {session.__class__!r}')
+                raise TypeError(f'expected requests.Session not {session.__class__.__name__}')
         else:
             session = requests  # type: ignore
         return cls(data, session, token=bot_token)
@@ -683,7 +682,7 @@ class SyncWebhook(BaseWebhook):
             A partial :class:`Webhook`.
             A partial webhook is just a webhook object with an ID and a token.
         """
-        m = re.search(r'discord(?:app)?.com/api/webhooks/(?P<id>[0-9]{17,20})/(?P<token>[A-Za-z0-9\.\-\_]{60,68})', url)
+        m = re.search(r'discord(?:app)?\.com/api/webhooks/(?P<id>[0-9]{17,20})/(?P<token>[A-Za-z0-9\.\-\_]{60,68})', url)
         if m is None:
             raise ValueError('Invalid webhook URL given.')
 
@@ -693,7 +692,7 @@ class SyncWebhook(BaseWebhook):
 
         if session is not MISSING:
             if not isinstance(session, requests.Session):
-                raise TypeError(f'expected requests.Session not {session.__class__!r}')
+                raise TypeError(f'expected requests.Session not {session.__class__.__name__}')
         else:
             session = requests  # type: ignore
         return cls(data, session, token=bot_token)  # type: ignore
@@ -871,6 +870,7 @@ class SyncWebhook(BaseWebhook):
         thread_name: str = MISSING,
         wait: Literal[True],
         suppress_embeds: bool = MISSING,
+        silent: bool = MISSING,
     ) -> SyncWebhookMessage:
         ...
 
@@ -891,6 +891,7 @@ class SyncWebhook(BaseWebhook):
         thread_name: str = MISSING,
         wait: Literal[False] = ...,
         suppress_embeds: bool = MISSING,
+        silent: bool = MISSING,
     ) -> None:
         ...
 
@@ -910,6 +911,7 @@ class SyncWebhook(BaseWebhook):
         thread_name: str = MISSING,
         wait: bool = False,
         suppress_embeds: bool = False,
+        silent: bool = False,
     ) -> Optional[SyncWebhookMessage]:
         """Sends a message using the webhook.
 
@@ -969,6 +971,11 @@ class SyncWebhook(BaseWebhook):
             Whether to suppress embeds for the message. This sends the message without any embeds if set to ``True``.
 
             .. versionadded:: 2.0
+        silent: :class:`bool`
+            Whether to suppress push and desktop notifications for the message. This will increment the mention counter
+            in the UI, but will not actually send a notification.
+
+            .. versionadded:: 2.2
 
         Raises
         --------
@@ -998,15 +1005,17 @@ class SyncWebhook(BaseWebhook):
         if content is None:
             content = MISSING
 
-        if suppress_embeds:
-            flags = MessageFlags._from_value(4)
+        if suppress_embeds or silent:
+            flags = MessageFlags._from_value(0)
+            flags.suppress_embeds = suppress_embeds
+            flags.suppress_notifications = silent
         else:
             flags = MISSING
 
         if thread_name is not MISSING and thread is not MISSING:
             raise TypeError('Cannot mix thread_name and thread keyword arguments.')
 
-        params = handle_message_parameters(
+        with handle_message_parameters(
             content=content,
             username=username,
             avatar_url=avatar_url,
@@ -1019,22 +1028,23 @@ class SyncWebhook(BaseWebhook):
             allowed_mentions=allowed_mentions,
             previous_allowed_mentions=previous_mentions,
             flags=flags,
-        )
-        adapter: WebhookAdapter = _get_webhook_adapter()
-        thread_id: Optional[int] = None
-        if thread is not MISSING:
-            thread_id = thread.id
+        ) as params:
+            adapter: WebhookAdapter = _get_webhook_adapter()
+            thread_id: Optional[int] = None
+            if thread is not MISSING:
+                thread_id = thread.id
 
-        data = adapter.execute_webhook(
-            self.id,
-            self.token,
-            session=self.session,
-            payload=params.payload,
-            multipart=params.multipart,
-            files=params.files,
-            thread_id=thread_id,
-            wait=wait,
-        )
+            data = adapter.execute_webhook(
+                self.id,
+                self.token,
+                session=self.session,
+                payload=params.payload,
+                multipart=params.multipart,
+                files=params.files,
+                thread_id=thread_id,
+                wait=wait,
+            )
+
         if wait:
             return self._create_message(data, thread=thread)
 
@@ -1143,31 +1153,30 @@ class SyncWebhook(BaseWebhook):
             raise ValueError('This webhook does not have a token associated with it')
 
         previous_mentions: Optional[AllowedMentions] = getattr(self._state, 'allowed_mentions', None)
-        params = handle_message_parameters(
+        with handle_message_parameters(
             content=content,
             attachments=attachments,
             embed=embed,
             embeds=embeds,
             allowed_mentions=allowed_mentions,
             previous_allowed_mentions=previous_mentions,
-        )
+        ) as params:
+            thread_id: Optional[int] = None
+            if thread is not MISSING:
+                thread_id = thread.id
 
-        thread_id: Optional[int] = None
-        if thread is not MISSING:
-            thread_id = thread.id
-
-        adapter: WebhookAdapter = _get_webhook_adapter()
-        data = adapter.edit_webhook_message(
-            self.id,
-            self.token,
-            message_id,
-            session=self.session,
-            payload=params.payload,
-            multipart=params.multipart,
-            files=params.files,
-            thread_id=thread_id,
-        )
-        return self._create_message(data, thread=thread)
+            adapter: WebhookAdapter = _get_webhook_adapter()
+            data = adapter.edit_webhook_message(
+                self.id,
+                self.token,
+                message_id,
+                session=self.session,
+                payload=params.payload,
+                multipart=params.multipart,
+                files=params.files,
+                thread_id=thread_id,
+            )
+            return self._create_message(data, thread=thread)
 
     def delete_message(self, message_id: int, /, *, thread: Snowflake = MISSING) -> None:
         """Deletes a message owned by this webhook.
@@ -1181,7 +1190,7 @@ class SyncWebhook(BaseWebhook):
         ------------
         message_id: :class:`int`
             The message ID to delete.
-        hread: :class:`~discord.abc.Snowflake`
+        thread: :class:`~discord.abc.Snowflake`
             The thread the webhook message belongs to.
 
             .. versionadded:: 2.0

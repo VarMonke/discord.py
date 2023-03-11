@@ -121,7 +121,7 @@ class WidgetMember(BaseUser):
 
         .. describe:: str(x)
 
-            Returns the widget member's `name#discriminator`.
+            Returns the widget member's ``name#discriminator``.
 
     Attributes
     -----------
@@ -152,13 +152,9 @@ class WidgetMember(BaseUser):
     """
 
     __slots__ = (
-        'name',
         'status',
         'nick',
         'avatar',
-        'discriminator',
-        'id',
-        'bot',
         'activity',
         'deafened',
         'suppress',
